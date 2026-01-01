@@ -33,3 +33,9 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 gpu = ["dep:cudarc", "cudarc/cuda-version-from-build-system"]
 new_cli = []
 new_engine = []
+
+[profile.release]
+# Performance-oriented defaults (no algorithm changes).
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

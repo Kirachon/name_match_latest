@@ -2,6 +2,7 @@
 
 # Local tooling artifacts (Codex/Context Engine)
 .augment-*
+.memories/
 
 # Editor/OS noise
 .DS_Store
