@@ -94,11 +94,13 @@ enum Msg {
 
 // GUI log forwarding: capture log::info!/warn!/error! and stream to GUI console via Msg
 use log::{Level, LevelFilter, Metadata, Record};
+use std::io::BufWriter;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
 static GUI_LOG_SENDER: OnceLock<Mutex<Option<Sender<Msg>>>> = OnceLock::new();
-static GUI_LOG_FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+static GUI_LOG_FILE: OnceLock<Mutex<Option<BufWriter<std::fs::File>>>> = OnceLock::new();
+static GUI_LOG_FILE_FLUSH_STATE: OnceLock<Mutex<(std::time::Instant, u32)>> = OnceLock::new();
 
 struct GuiForwardLogger;
 impl log::Log for GuiForwardLogger {
@@ -123,7 +125,18 @@ impl log::Log for GuiForwardLogger {
             if let Ok(mut g) = fm.lock() {
                 if let Some(f) = g.as_mut() {
                     let _ = writeln!(f, "{}", line);
-                    let _ = f.flush();
+                    // Avoid flushing on every line (disk I/O can dominate runtime). Flush periodically.
+                    if let Some(st) = GUI_LOG_FILE_FLUSH_STATE.get() {
+                        if let Ok(mut s) = st.lock() {
+                            s.1 = s.1.saturating_add(1);
+                            if s.0.elapsed() >= std::time::Duration::from_millis(250)
+                                || (s.1 % 200) == 0
+                            {
+                                let _ = f.flush();
+                                s.0 = std::time::Instant::now();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -374,6 +387,10 @@ struct GuiApp {
     pool_size: String,
     batch_size: String,
     mem_thresh: String,
+    rayon_threads: String,
+    gpu_streams: String,
+    gpu_buffer_pool: bool,
+    gpu_pinned_host: bool,
     use_gpu: bool,
     use_gpu_hash_join: bool,
     // Granular GPU hash-join controls
@@ -577,8 +594,13 @@ impl GuiApp {
         // Step 5: Apply aggressive GPU optimizations
         let cores = profile.cpu.cores.max(1);
 
-        // Database connection pool: cores × 6 (capped at 96)
-        let pool_size = (cores.saturating_mul(6)).min(96);
+        // Database connection pool:
+        // - For remote MySQL, large pools often hurt (server thrash / timeouts).
+        // - For local MySQL, we can safely scale higher.
+        let db_is_local = Self::is_local_db_host(&self.host)
+            && (!self.enable_dual || Self::is_local_db_host(&self.host2));
+        let pool_cap = if db_is_local { 32 } else { 16 };
+        let pool_size = (cores.saturating_mul(2)).clamp(8, pool_cap);
         self.pool_size = pool_size.to_string();
 
         // Apply mode-specific settings
@@ -588,12 +610,18 @@ impl GuiApp {
                 let icfg = name_matcher::optimization::calculate_inmemory_config(
                     &profile, self.algo, true,
                 );
+                if icfg.rayon_threads > 0 {
+                    self.rayon_threads = icfg.rayon_threads.to_string();
+                }
 
                 // GPU settings
                 if let Some(g) = &profile.gpu {
                     self.use_gpu = true;
                     self.gpu_total_mb = g.vram_total_mb;
                     self.gpu_free_mb = g.vram_free_mb;
+                    self.gpu_streams = if g.vram_total_mb >= 6144 { "2" } else { "1" }.into();
+                    self.gpu_buffer_pool = true;
+                    self.gpu_pinned_host = g.vram_total_mb >= 4096;
 
                     // Ultra aggressive: 90% of free VRAM
                     let reserve_mb = if g.vram_free_mb >= 4096 { 128 } else { 64 };
@@ -625,6 +653,9 @@ impl GuiApp {
                 let scfg = name_matcher::optimization::calculate_streaming_config(
                     &profile, self.algo, true,
                 );
+                if scfg.prefetch_pool_size > 0 {
+                    // Streaming config doesn't expose rayon threads directly; keep current UI value.
+                }
 
                 // Ultra aggressive batch size: 90% of available RAM
                 let target_batch_mem_mb = (available_ram_mb as f64 * 0.90) as u64;
@@ -640,6 +671,9 @@ impl GuiApp {
                     self.use_gpu = true;
                     self.gpu_total_mb = g.vram_total_mb;
                     self.gpu_free_mb = g.vram_free_mb;
+                    self.gpu_streams = if g.vram_total_mb >= 6144 { "2" } else { "1" }.into();
+                    self.gpu_buffer_pool = true;
+                    self.gpu_pinned_host = g.vram_total_mb >= 4096;
 
                     // Ultra aggressive: 90% of free VRAM
                     let reserve_mb = if g.vram_free_mb >= 4096 { 128 } else { 64 };
@@ -1005,6 +1039,11 @@ impl Default for GuiApp {
         let (_tx, rx) = mpsc::channel();
         let thr = Self::read_fuzzy_threshold_pref().unwrap_or(95);
         let allow_birth_swap = name_matcher::matching::birthdate_matcher::allow_birthdate_swap();
+        let suggested_rayon_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .min(12)
+            .max(1);
         // Keep environment in sync with initial GUI state
         unsafe {
             std::env::set_var(
@@ -1059,6 +1098,10 @@ impl Default for GuiApp {
             pool_size: "16".into(),
             batch_size: "50000".into(),
             mem_thresh: "800".into(),
+            rayon_threads: suggested_rayon_threads.to_string(),
+            gpu_streams: "2".into(),
+            gpu_buffer_pool: true,
+            gpu_pinned_host: false,
             use_gpu: false,
             fuzzy_gpu_mode: FuzzyGpuMode::Off,
 
@@ -1120,6 +1163,11 @@ impl Default for GuiApp {
 }
 
 impl GuiApp {
+    fn is_local_db_host(host: &str) -> bool {
+        let h = host.trim().to_ascii_lowercase();
+        h == "localhost" || h == "127.0.0.1" || h == "::1"
+    }
+
     /// Returns a user-friendly label for the given algorithm
     fn algorithm_label(algo: MatchingAlgorithm) -> &'static str {
         match algo {
@@ -2066,6 +2114,35 @@ impl GuiApp {
                         .on_hover_text("Maximum number of concurrent database connections in the connection pool");
                     ui.end_row();
 
+                    ui.label("Rayon Threads:");
+                    ui.add(TextEdit::singleline(&mut self.rayon_threads).desired_width(80.0))
+                        .on_hover_text("CPU parallelism for matching. 0 = leave default. Too high can hurt performance on remote MySQL workloads (oversubscription).");
+                    ui.end_row();
+
+                    ui.label("GPU Streams:");
+                    ui.add_enabled(self.use_gpu && cfg!(feature = "gpu"), TextEdit::singleline(&mut self.gpu_streams).desired_width(80.0))
+                        .on_hover_text("CUDA streams for overlap (1 = off). 2 is a safe start for RTX 4050; try 3 if stable.");
+                    if !(self.use_gpu && cfg!(feature = "gpu")) { ui.weak("(requires GPU build)"); }
+                    ui.end_row();
+
+                    ui.label("GPU Buffer Pool:");
+                    ui.add_enabled(
+                        self.use_gpu && cfg!(feature = "gpu"),
+                        egui::Checkbox::new(&mut self.gpu_buffer_pool, ""),
+                    )
+                    .on_hover_text("Reuse GPU buffers to reduce allocations (usually faster).");
+                    if !(self.use_gpu && cfg!(feature = "gpu")) { ui.weak("(requires GPU build)"); }
+                    ui.end_row();
+
+                    ui.label("GPU Pinned Host:");
+                    ui.add_enabled(
+                        self.use_gpu && cfg!(feature = "gpu"),
+                        egui::Checkbox::new(&mut self.gpu_pinned_host, ""),
+                    )
+                    .on_hover_text("Use pinned host staging to improve transfers/overlap (may increase RAM pressure).");
+                    if !(self.use_gpu && cfg!(feature = "gpu")) { ui.weak("(requires GPU build)"); }
+                    ui.end_row();
+
                     ui.label("Batch Size:");
                     let resp_batch = ui.add_enabled(streaming_enabled, TextEdit::singleline(&mut self.batch_size).desired_width(80.0));
                     if !streaming_enabled {
@@ -2557,7 +2634,12 @@ impl GuiApp {
             if let Ok(file) = std::fs::File::create(&path_str) {
                 let m = GUI_LOG_FILE.get_or_init(|| Mutex::new(None));
                 if let Ok(mut g) = m.lock() {
-                    *g = Some(file);
+                    *g = Some(BufWriter::new(file));
+                }
+                let st = GUI_LOG_FILE_FLUSH_STATE
+                    .get_or_init(|| Mutex::new((std::time::Instant::now(), 0)));
+                if let Ok(mut s) = st.lock() {
+                    *s = (std::time::Instant::now(), 0);
                 }
                 if let Ok(ch) = spawn_console_tail(std::path::Path::new(&path_str)) {
                     self.console_child = Some(ch);
@@ -2628,6 +2710,15 @@ impl GuiApp {
         let pool_sz = self.pool_size.parse::<u32>().unwrap_or(16);
         let batch = self.batch_size.parse::<i64>().unwrap_or(50_000);
         let fuzzy_gpu_mode = self.fuzzy_gpu_mode;
+        let rayon_threads = self.rayon_threads.parse::<usize>().unwrap_or(0);
+        let gpu_streams_val = self
+            .gpu_streams
+            .parse::<u32>()
+            .ok()
+            .unwrap_or(2)
+            .clamp(1, 16);
+        let gpu_buffer_pool = self.gpu_buffer_pool;
+        let gpu_pinned_host = self.gpu_pinned_host;
 
         // Advanced Matching selections
         let advanced_enabled = self.advanced_enabled;
@@ -2673,6 +2764,15 @@ impl GuiApp {
                 cancel: cancel_flag.clone(),
                 pause: pause_flag.clone(),
             });
+
+            if rayon_threads > 0 {
+                unsafe {
+                    std::env::set_var("RAYON_NUM_THREADS", rayon_threads.to_string());
+                }
+                let _ = rayon::ThreadPoolBuilder::new()
+                    .num_threads(rayon_threads)
+                    .build_global();
+            }
 
             // Persist preference off the GUI thread to avoid blocking UI
             let _ = std::fs::write(
@@ -2738,6 +2838,9 @@ impl GuiApp {
                 scfg.use_gpu_build_hash = use_gpu_build_hash;
                 scfg.use_gpu_probe_hash = use_gpu_probe_hash;
                 scfg.gpu_probe_batch_mb = gpu_probe_mem_mb_val;
+                scfg.gpu_streams = gpu_streams_val;
+                scfg.gpu_buffer_pool = gpu_buffer_pool;
+                scfg.gpu_use_pinned_host = gpu_pinned_host;
                 // CPU-GPU parity is always-on for Options 3–6 on CPU; no toggle call required.
                 scfg.use_gpu_fuzzy_direct_hash = use_gpu_fuzzy_direct_hash;
                 scfg.direct_use_fuzzy_normalization = direct_norm_fuzzy;
@@ -2774,6 +2877,9 @@ impl GuiApp {
                 log::info!("[GUI]   GPU Build Hash: {}", scfg.use_gpu_build_hash);
                 log::info!("[GUI]   GPU Probe Hash: {}", scfg.use_gpu_probe_hash);
                 log::info!("[GUI]   GPU Probe Batch: {} MB", scfg.gpu_probe_batch_mb);
+                log::info!("[GUI]   GPU Streams: {}", scfg.gpu_streams);
+                log::info!("[GUI]   GPU Buffer Pool: {}", scfg.gpu_buffer_pool);
+                log::info!("[GUI]   GPU Pinned Host: {}", scfg.gpu_use_pinned_host);
                 log::info!("[GUI]   GPU Fuzzy Direct Hash: {}", scfg.use_gpu_fuzzy_direct_hash);
                 log::info!("[GUI]   GPU Fuzzy Metrics: {}", scfg.use_gpu_fuzzy_metrics);
                 log::info!("[GUI]   Direct Use Fuzzy Normalization: {}", scfg.direct_use_fuzzy_normalization);
