@@ -1,0 +1,12 @@
+/target/
+
+# Local tooling artifacts (Codex/Context Engine)
+.augment-*
+
+# Editor/OS noise
+.DS_Store
+*.swp
+*.swo
+*~
+*.bak
+*.bak_*
