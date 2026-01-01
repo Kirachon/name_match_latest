@@ -72,6 +72,7 @@ enum Msg {
     DbPools {
         pool1: MySqlPool,
         pool2: Option<MySqlPool>,
+        pool_size: u32,
     },
 
     Tables2(Vec<String>),
@@ -357,6 +358,7 @@ struct GuiApp {
     // Cached pools from last successful 'Load Tables' to reduce start-up latency
     pool1_cache: Option<MySqlPool>,
     pool2_cache: Option<MySqlPool>,
+    pool_cache_size: Option<u32>,
 
     // Schema metadata caches (TTL-based) to avoid repeated INFORMATION_SCHEMA and COUNT(*) on startup
     schema_cache: std::sync::Arc<
@@ -593,15 +595,26 @@ impl GuiApp {
 
         // Step 5: Apply aggressive GPU optimizations
         let cores = profile.cpu.cores.max(1);
+        let threads = profile.cpu.threads.max(1);
 
         // Database connection pool:
         // - For remote MySQL, large pools often hurt (server thrash / timeouts).
         // - For local MySQL, we can safely scale higher.
         let db_is_local = Self::is_local_db_host(&self.host)
             && (!self.enable_dual || Self::is_local_db_host(&self.host2));
-        let pool_cap = if db_is_local { 32 } else { 16 };
-        let pool_size = (cores.saturating_mul(2)).clamp(8, pool_cap);
+        // For remote DBs, favor a smaller pool to avoid server thrash and timeouts.
+        // For local DBs, scale more aggressively.
+        let pool_size = if db_is_local {
+            (cores.saturating_mul(2)).clamp(12, 32)
+        } else {
+            12
+        };
         self.pool_size = pool_size.to_string();
+
+        // CPU parallelism: keep a bit of headroom for OS/DB/network threads.
+        // SystemProfile uses logical threads for both cores/threads on most platforms.
+        let rayon_threads_target = threads.saturating_sub(4).clamp(8, 16);
+        self.rayon_threads = rayon_threads_target.to_string();
 
         // Apply mode-specific settings
         match selected_mode {
@@ -657,9 +670,16 @@ impl GuiApp {
                     // Streaming config doesn't expose rayon threads directly; keep current UI value.
                 }
 
-                // Ultra aggressive batch size: 90% of available RAM
-                let target_batch_mem_mb = (available_ram_mb as f64 * 0.90) as u64;
-                let batch_rows_est = ((target_batch_mem_mb * 256) as i64).clamp(10_000, 500_000);
+                // Batch size heuristic:
+                // - Remote DB: larger batches reduce round trips, but huge batches can cause long-running queries/timeouts.
+                // - Local DB: we can be more aggressive.
+                let target_batch_mem_mb = if db_is_local {
+                    (available_ram_mb as f64 * 0.90) as u64
+                } else {
+                    (available_ram_mb as f64 * 0.50) as u64
+                };
+                let batch_rows_est = (target_batch_mem_mb.saturating_mul(256) as i64)
+                    .clamp(50_000, if db_is_local { 500_000 } else { 200_000 });
                 self.batch_size = batch_rows_est.to_string();
 
                 // Memory soft minimum: 10% of total RAM
@@ -1060,6 +1080,7 @@ impl Default for GuiApp {
             enable_dual: false,
             pool1_cache: None,
             pool2_cache: None,
+            pool_cache_size: None,
             schema_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             schema_cache_timestamp: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
 
@@ -2555,6 +2576,7 @@ impl GuiApp {
                         let _ = tx.send(Msg::DbPools {
                             pool1: p1,
                             pool2: Some(p2),
+                            pool_size: 8,
                         });
                     }
                     Err(e) => {
@@ -2582,6 +2604,7 @@ impl GuiApp {
                         let _ = tx.send(Msg::DbPools {
                             pool1: p,
                             pool2: None,
+                            pool_size: 8,
                         });
                     }
                     Err(e) => {
@@ -2692,6 +2715,7 @@ impl GuiApp {
         // Cache handles captured for potential reuse (pre-warmed in Load Tables)
         let pool1_cache = self.pool1_cache.clone();
         let pool2_cache = self.pool2_cache.clone();
+        let pool_cache_size = self.pool_cache_size;
         let fuzzy_threshold_pct_val = self.fuzzy_threshold_pct;
 
         let use_gpu_build_hash = self.use_gpu_build_hash;
@@ -2789,10 +2813,20 @@ impl GuiApp {
                 // Announce initialization start
                 let _ = tx_for_async.send(Msg::Info("Initializing resources...".into()));
                 // Try to reuse cached DB pools when available and compatible
-                let (pool1, pool2_opt) = if let Some(p1_cached) = pool1_cache.clone() {
+                let (pool1, pool2_opt) = if pool_cache_size == Some(pool_sz) {
+                    if let Some(p1_cached) = pool1_cache.clone() {
                     let _ = tx_for_async.send(Msg::Info("Reusing cached database connections".into()));
                     let p2 = if enable_dual { pool2_cache.clone() } else { None };
                     (p1_cached, p2)
+                    } else if enable_dual {
+                        let _ = tx_for_async.send(Msg::Info("Connecting to databases...".into()));
+                        let p1 = make_pool_with_size(&cfg1, Some(pool_sz)).await?;
+                        let p2 = make_pool_with_size(cfg2.as_ref().unwrap(), Some(pool_sz)).await?;
+                        (p1, Some(p2))
+                    } else {
+                        let _ = tx_for_async.send(Msg::Info("Connecting to database...".into()));
+                        (make_pool_with_size(&cfg1, Some(pool_sz)).await?, None)
+                    }
                 } else if enable_dual {
                     let _ = tx_for_async.send(Msg::Info("Connecting to databases...".into()));
                     let p1 = make_pool_with_size(&cfg1, Some(pool_sz)).await?;
@@ -2802,6 +2836,11 @@ impl GuiApp {
                     let _ = tx_for_async.send(Msg::Info("Connecting to database...".into()));
                     (make_pool_with_size(&cfg1, Some(pool_sz)).await?, None)
                 };
+                let _ = tx_for_async.send(Msg::DbPools {
+                    pool1: pool1.clone(),
+                    pool2: pool2_opt.clone(),
+                    pool_size: pool_sz,
+                });
 
                 // StreamingConfig: Performance Characteristics and Trade-offs
                 // ============================================================
@@ -3985,9 +4024,14 @@ impl GuiApp {
                     }
                     self.status = format!("Loaded {} tables (DB2)", self.tables2.len());
                 }
-                Msg::DbPools { pool1, pool2 } => {
+                Msg::DbPools {
+                    pool1,
+                    pool2,
+                    pool_size,
+                } => {
                     self.pool1_cache = Some(pool1);
                     self.pool2_cache = pool2;
+                    self.pool_cache_size = Some(pool_size);
                     self.status = "Connection ready".into();
                 }
 
