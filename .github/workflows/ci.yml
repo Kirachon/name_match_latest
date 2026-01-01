@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  fmt:
+    name: Rust fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  check:
+    name: Rust check (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --bins
+
+  build_gui_cpu_windows:
+    name: Build GUI (CPU, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --bin gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows-cpu
+          path: target/release/gui.exe
+
+  build_gui_cpu_linux:
+    name: Build GUI (CPU, Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --bin gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-cpu
+          path: target/release/gui
+
+  build_gui_gpu_windows_self_hosted:
+    name: Build GUI (GPU, self-hosted Windows)
+    runs-on: [self-hosted, windows, cuda]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify nvcc
+        run: nvcc --version
+      - run: cargo build --release --features gpu --bin gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows-gpu
+          path: target/release/gui.exe
