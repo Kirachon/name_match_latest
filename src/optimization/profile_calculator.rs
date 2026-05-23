@@ -107,8 +107,8 @@ pub fn calculate_streaming_config(
             probe.clamp(256, 4096)
         };
         cfg.gpu_probe_batch_mb = probe;
-        // Streams: 1-4
-        cfg.gpu_streams = if aggressive { (cores.min(8)).max(2) } else { 1 };
+        // Streams: default to 1 (users can override)
+        cfg.gpu_streams = 1;
         // Buffer pool and pinned host best-effort
         cfg.gpu_buffer_pool = true;
         cfg.gpu_use_pinned_host = aggressive;

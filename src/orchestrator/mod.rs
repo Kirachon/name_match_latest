@@ -120,6 +120,8 @@ pub struct RunConfig {
     pub format: String,
     /// CLI flags
     pub flags: CliFlags,
+    /// Experimental GPU-assisted matching toggle (checkbox/flag gated, default off)
+    pub experimental_gpu_assisted: bool,
     /// Run start timestamp
     pub run_start_utc: chrono::DateTime<chrono::Utc>,
 }

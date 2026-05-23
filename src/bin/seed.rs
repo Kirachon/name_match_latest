@@ -25,21 +25,29 @@ async fn main() -> Result<()> {
         .get(8)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(30000);
+    let skip_create_db = std::env::var("NAME_MATCHER_SEED_SKIP_CREATE_DB")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false);
 
     println!("Seeding MySQL {db}::{t1},{t2} on {host}:{port} with {rows} rows each...");
 
-    // 1) Connect to server-level DB to create target database
-    let url_server = format!("mysql://{user}:{pass}@{host}:{port}/mysql");
-    let pool_server = MySqlPoolOptions::new()
-        .max_connections(5)
-        .connect(&url_server)
+    if !skip_create_db {
+        // 1) Connect to server-level DB to create target database
+        let url_server = format!("mysql://{user}:{pass}@{host}:{port}/mysql");
+        let pool_server = MySqlPoolOptions::new()
+            .max_connections(5)
+            .connect(&url_server)
+            .await?;
+        sqlx::query(&format!(
+            "CREATE DATABASE IF NOT EXISTS `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci",
+            db
+        ))
+        .execute(&pool_server)
         .await?;
-    sqlx::query(&format!(
-        "CREATE DATABASE IF NOT EXISTS `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci",
-        db
-    ))
-    .execute(&pool_server)
-    .await?;
+    } else {
+        println!("Skipping CREATE DATABASE because NAME_MATCHER_SEED_SKIP_CREATE_DB=1");
+    }
 
     // 2) Connect to target database
     let url_db = format!("mysql://{user}:{pass}@{host}:{port}/{db}");

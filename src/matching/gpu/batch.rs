@@ -20,8 +20,62 @@ use super::*; // Import from parent gpu module
 use crate::matching::MatchPair;
 use crate::matching::birthdate_matcher::birthdate_matches;
 use crate::models::{NormalizedPerson, Person};
-use cudarc::driver::{CudaContext, CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
-use std::sync::Arc;
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaStream, LaunchConfig, PushKernelArg, PinnedHostSlice,
+};
+use std::sync::{Arc, OnceLock};
+
+fn gpu_batch_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("NAME_MATCHER_GPU_BATCH_LOG")
+            .ok()
+            .map(|v| {
+                let v = v.trim();
+                !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+            })
+            .unwrap_or(true)
+    })
+}
+
+fn gpu_fuzzy_readback_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("NAME_MATCHER_GPU_FUZZY_READBACK")
+            .ok()
+            .map(|v| {
+                let v = v.trim();
+                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn gpu_pinned_host_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("NAME_MATCHER_GPU_PINNED_HOST")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true)
+    })
+}
+
+fn log_pinned_host_once() {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    let _ = LOGGED.get_or_init(|| {
+        log::info!("[GPU] Using pinned host memory for fuzzy batch staging buffers");
+    });
+}
+
+#[inline]
+fn gpu_name_string(cache: &FuzzyCache) -> &str {
+    if super::gpu_no_mid_mode() {
+        &cache.simple_full_no_mid
+    } else {
+        &cache.simple_full
+    }
+}
 
 /// Lightweight structure representing a candidate pair to be processed by GPU.
 ///
@@ -69,6 +123,22 @@ pub struct GpuBatchAccumulator {
 
     /// Maximum batch size (derived from VRAM budget)
     max_batch_size: usize,
+
+    // Reusable host-side scratch buffers to reduce allocations per flush
+    a_bytes: Vec<u8>,
+    a_offsets: Vec<i32>,
+    a_lengths: Vec<i32>,
+    b_bytes: Vec<u8>,
+    b_offsets: Vec<i32>,
+    b_lengths: Vec<i32>,
+
+    // Optional pinned host staging buffers (reused when sizes match)
+    pinned_a_bytes: Option<PinnedHostSlice<u8>>,
+    pinned_a_offsets: Option<PinnedHostSlice<i32>>,
+    pinned_a_lengths: Option<PinnedHostSlice<i32>>,
+    pinned_b_bytes: Option<PinnedHostSlice<u8>>,
+    pinned_b_offsets: Option<PinnedHostSlice<i32>>,
+    pinned_b_lengths: Option<PinnedHostSlice<i32>>,
 }
 
 impl GpuBatchAccumulator {
@@ -84,6 +154,18 @@ impl GpuBatchAccumulator {
         Self {
             pairs: Vec::with_capacity(max_batch_size),
             max_batch_size,
+            a_bytes: Vec::new(),
+            a_offsets: Vec::new(),
+            a_lengths: Vec::new(),
+            b_bytes: Vec::new(),
+            b_offsets: Vec::new(),
+            b_lengths: Vec::new(),
+            pinned_a_bytes: None,
+            pinned_a_offsets: None,
+            pinned_a_lengths: None,
+            pinned_b_bytes: None,
+            pinned_b_offsets: None,
+            pinned_b_lengths: None,
         }
     }
 
@@ -167,7 +249,7 @@ impl GpuBatchAccumulator {
         cache2: &[FuzzyCache],
         t1: &[Person],
         t2: &[Person],
-        _ctx: &CudaContext,
+        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
         _stream2: &Arc<CudaStream>,
         func: &CudaFunction,
@@ -183,54 +265,219 @@ impl GpuBatchAccumulator {
             return Ok(());
         }
 
-        log::info!("[GPU_BATCH] Flushing {} pairs to GPU", self.pairs.len());
+        if gpu_batch_log_enabled() {
+            log::info!("[GPU_BATCH] Flushing {} pairs to GPU", self.pairs.len());
+        }
 
         // Build string arrays from accumulated pairs (reuse logic from match_fuzzy_gpu lines 2735-2745)
-        let mut a_bytes: Vec<u8> = Vec::new();
-        let mut a_offsets: Vec<i32> = Vec::new();
-        let mut a_lengths: Vec<i32> = Vec::new();
-        let mut b_bytes: Vec<u8> = Vec::new();
-        let mut b_offsets: Vec<i32> = Vec::new();
-        let mut b_lengths: Vec<i32> = Vec::new();
+        let pairs = &self.pairs;
+        let n_pairs = pairs.len();
+        let mut use_pinned = gpu_pinned_host_enabled();
+        let mut a_total: usize = 0;
+        let mut b_total: usize = 0;
+        for pair in pairs {
+            let s1 = gpu_name_string(&cache1[pair.outer_idx]);
+            let s2 = gpu_name_string(&cache2[pair.inner_idx]);
+            a_total += s1.as_bytes().len().min(MAX_STR);
+            b_total += s2.as_bytes().len().min(MAX_STR);
+        }
+        if use_pinned && (a_total == 0 || b_total == 0) {
+            use_pinned = false;
+        }
 
-        // Reserve capacity for efficiency
-        let n_pairs = self.pairs.len();
-        a_offsets.reserve_exact(n_pairs);
-        a_lengths.reserve_exact(n_pairs);
-        b_offsets.reserve_exact(n_pairs);
-        b_lengths.reserve_exact(n_pairs);
-        a_bytes.reserve(n_pairs * 32);
-        b_bytes.reserve(n_pairs * 32);
+        let (a_bytes, a_offsets, a_lengths, b_bytes, b_offsets, b_lengths) = (
+            &mut self.a_bytes,
+            &mut self.a_offsets,
+            &mut self.a_lengths,
+            &mut self.b_bytes,
+            &mut self.b_offsets,
+            &mut self.b_lengths,
+        );
+        if use_pinned {
+            let pinned_setup = (|| -> Result<()> {
+                if self.pinned_a_bytes.as_ref().map(|b| b.len()) != Some(a_total) {
+                    self.pinned_a_bytes = Some(unsafe { ctx.alloc_pinned::<u8>(a_total) }?);
+                }
+                if self.pinned_b_bytes.as_ref().map(|b| b.len()) != Some(b_total) {
+                    self.pinned_b_bytes = Some(unsafe { ctx.alloc_pinned::<u8>(b_total) }?);
+                }
+                if self.pinned_a_offsets.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                    self.pinned_a_offsets = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
+                }
+                if self.pinned_a_lengths.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                    self.pinned_a_lengths = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
+                }
+                if self.pinned_b_offsets.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                    self.pinned_b_offsets = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
+                }
+                if self.pinned_b_lengths.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                    self.pinned_b_lengths = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
+                }
 
-        for pair in &self.pairs {
-            let s1 = &cache1[pair.outer_idx].simple_full;
-            let s2 = &cache2[pair.inner_idx].simple_full;
-            let s1b = s1.as_bytes();
-            let s2b = s2.as_bytes();
+                let a_bytes_slice = self
+                    .pinned_a_bytes
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Pinned a_bytes missing"))?
+                    .as_mut_slice()?;
+                let b_bytes_slice = self
+                    .pinned_b_bytes
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Pinned b_bytes missing"))?
+                    .as_mut_slice()?;
+                let a_offsets_slice = self
+                    .pinned_a_offsets
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Pinned a_offsets missing"))?
+                    .as_mut_slice()?;
+                let a_lengths_slice = self
+                    .pinned_a_lengths
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Pinned a_lengths missing"))?
+                    .as_mut_slice()?;
+                let b_offsets_slice = self
+                    .pinned_b_offsets
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Pinned b_offsets missing"))?
+                    .as_mut_slice()?;
+                let b_lengths_slice = self
+                    .pinned_b_lengths
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Pinned b_lengths missing"))?
+                    .as_mut_slice()?;
 
-            // Append s1 to a_bytes with offset and length
-            let a_off = a_bytes.len() as i32;
-            a_offsets.push(a_off);
-            let la = s1b.len().min(MAX_STR);
-            a_lengths.push(la as i32);
-            a_bytes.extend_from_slice(&s1b[..la]);
+                let mut a_cur = 0usize;
+                let mut b_cur = 0usize;
+                for (idx, pair) in pairs.iter().enumerate() {
+                    let s1 = gpu_name_string(&cache1[pair.outer_idx]);
+                    let s2 = gpu_name_string(&cache2[pair.inner_idx]);
+                    let s1b = s1.as_bytes();
+                    let s2b = s2.as_bytes();
 
-            // Append s2 to b_bytes with offset and length
-            let b_off = b_bytes.len() as i32;
-            b_offsets.push(b_off);
-            let lb = s2b.len().min(MAX_STR);
-            b_lengths.push(lb as i32);
-            b_bytes.extend_from_slice(&s2b[..lb]);
+                    let la = s1b.len().min(MAX_STR);
+                    a_offsets_slice[idx] = a_cur as i32;
+                    a_lengths_slice[idx] = la as i32;
+                    if la > 0 {
+                        let end = a_cur + la;
+                        a_bytes_slice[a_cur..end].copy_from_slice(&s1b[..la]);
+                        a_cur = end;
+                    }
+
+                    let lb = s2b.len().min(MAX_STR);
+                    b_offsets_slice[idx] = b_cur as i32;
+                    b_lengths_slice[idx] = lb as i32;
+                    if lb > 0 {
+                        let end = b_cur + lb;
+                        b_bytes_slice[b_cur..end].copy_from_slice(&s2b[..lb]);
+                        b_cur = end;
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(e) = pinned_setup {
+                log::warn!(
+                    "[GPU] Pinned host allocation failed ({}); falling back to pageable host memory",
+                    e
+                );
+                use_pinned = false;
+            } else {
+                log_pinned_host_once();
+            }
+        }
+
+        if !use_pinned {
+            a_bytes.clear();
+            a_offsets.clear();
+            a_lengths.clear();
+            b_bytes.clear();
+            b_offsets.clear();
+            b_lengths.clear();
+
+            // Reserve capacity for efficiency
+            a_offsets.reserve_exact(n_pairs);
+            a_lengths.reserve_exact(n_pairs);
+            b_offsets.reserve_exact(n_pairs);
+            b_lengths.reserve_exact(n_pairs);
+            a_bytes.reserve(n_pairs * 32);
+            b_bytes.reserve(n_pairs * 32);
+
+            for pair in pairs {
+                let s1 = gpu_name_string(&cache1[pair.outer_idx]);
+                let s2 = gpu_name_string(&cache2[pair.inner_idx]);
+                let s1b = s1.as_bytes();
+                let s2b = s2.as_bytes();
+
+                // Append s1 to a_bytes with offset and length
+                let a_off = a_bytes.len() as i32;
+                a_offsets.push(a_off);
+                let la = s1b.len().min(MAX_STR);
+                a_lengths.push(la as i32);
+                a_bytes.extend_from_slice(&s1b[..la]);
+
+                // Append s2 to b_bytes with offset and length
+                let b_off = b_bytes.len() as i32;
+                b_offsets.push(b_off);
+                let lb = s2b.len().min(MAX_STR);
+                b_lengths.push(lb as i32);
+                b_bytes.extend_from_slice(&s2b[..lb]);
+            }
         }
 
         // Launch GPU kernels (reuse logic from match_fuzzy_gpu lines 2761-2799)
         // Transfer arrays to GPU device memory
-        let d_a = stream.memcpy_stod(a_bytes.as_slice())?;
-        let d_a_off = stream.memcpy_stod(a_offsets.as_slice())?;
-        let d_a_len = stream.memcpy_stod(a_lengths.as_slice())?;
-        let d_b = stream.memcpy_stod(b_bytes.as_slice())?;
-        let d_b_off = stream.memcpy_stod(b_offsets.as_slice())?;
-        let d_b_len = stream.memcpy_stod(b_lengths.as_slice())?;
+        let d_a = if use_pinned {
+            let buf = self
+                .pinned_a_bytes
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned a_bytes missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(a_bytes.as_slice())?
+        };
+        let d_a_off = if use_pinned {
+            let buf = self
+                .pinned_a_offsets
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned a_offsets missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(a_offsets.as_slice())?
+        };
+        let d_a_len = if use_pinned {
+            let buf = self
+                .pinned_a_lengths
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned a_lengths missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(a_lengths.as_slice())?
+        };
+        let d_b = if use_pinned {
+            let buf = self
+                .pinned_b_bytes
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned b_bytes missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(b_bytes.as_slice())?
+        };
+        let d_b_off = if use_pinned {
+            let buf = self
+                .pinned_b_offsets
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned b_offsets missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(b_offsets.as_slice())?
+        };
+        let d_b_len = if use_pinned {
+            let buf = self
+                .pinned_b_lengths
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned b_lengths missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(b_lengths.as_slice())?
+        };
 
         // Allocate GPU output buffers
         let mut d_lev = stream.alloc_zeros::<f32>(n_pairs)?;
@@ -313,10 +560,12 @@ impl GpuBatchAccumulator {
             b4.launch(cfg)?;
         }
 
-        // Read back GPU outputs (computed but not used for classification - kept for potential future use)
-        let _final_scores: Vec<f32> = stream.memcpy_dtov(&d_final)?;
-        let _lev_scores: Vec<f32> = stream.memcpy_dtov(&d_lev)?;
-        let _jw_scores: Vec<f32> = stream.memcpy_dtov(&d_w)?;
+        // Read back GPU outputs only when explicitly enabled (not used for classification).
+        if gpu_fuzzy_readback_enabled() {
+            let _final_scores: Vec<f32> = stream.memcpy_dtov(&d_final)?;
+            let _lev_scores: Vec<f32> = stream.memcpy_dtov(&d_lev)?;
+            let _jw_scores: Vec<f32> = stream.memcpy_dtov(&d_w)?;
+        }
 
         // Post-processing: birthdate match (with optional month/day swap) + authoritative classification.
         // PARITY FIX: Use CPU In-Memory classification logic (compare_persons_no_mid / compare_persons_new)
@@ -352,8 +601,10 @@ impl GpuBatchAccumulator {
 
             // Use CPU In-Memory classification logic for parity
             let cls = if super::gpu_no_mid_mode() {
-                // No-middle classification: recompute metrics on-the-fly (matches CPU In-Memory)
-                super::compare_persons_no_mid(&t1[pair.outer_idx], &t2[pair.inner_idx])
+                super::classify_pair_cached_no_mid(
+                    &cache1[pair.outer_idx],
+                    &cache2[pair.inner_idx],
+                )
             } else {
                 // L10 PARITY FIX: Full middle name required (length >= 2 after trimming '.')
                 // This matches the CPU path in advanced_matcher.rs lines 278-292
@@ -382,19 +633,19 @@ impl GpuBatchAccumulator {
                     continue;
                 }
                 // Full-name (with middle) classification
-                super::compare_persons_new(&t1[pair.outer_idx], &t2[pair.inner_idx])
+                super::classify_pair_cached(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
             };
 
             if let Some((score, label)) = cls {
                 results.push(MatchPair {
                     person1: t1[pair.outer_idx].clone(),
                     person2: t2[pair.inner_idx].clone(),
-                    confidence: (score / 100.0) as f32,
+                    confidence: score as f32,
                     matched_fields: vec!["fuzzy".into(), label, "birthdate".into()],
                     is_matched_infnbd: false,
                     is_matched_infnmnbd: false,
                 });
-            } else if is_swap {
+            } else if is_swap && gpu_batch_log_enabled() {
                 // Log swap matches that fail classification
                 log::debug!(
                     "[GPU_BATCH] Swap match failed classification: id1={}, id2={}, first1={:?}, first2={:?}, last1={:?}, last2={:?}",
@@ -408,15 +659,17 @@ impl GpuBatchAccumulator {
             }
         }
 
-        log::info!(
-            "[GPU_BATCH] Processed {} pairs, found {} matches (bd_pass={}, bd_fail={}, swap_pass={}, swap_fail={})",
-            n_pairs,
-            results.len(),
-            bd_pass,
-            bd_fail,
-            swap_pass,
-            swap_fail
-        );
+        if gpu_batch_log_enabled() {
+            log::info!(
+                "[GPU_BATCH] Processed {} pairs, found {} matches (bd_pass={}, bd_fail={}, swap_pass={}, swap_fail={})",
+                n_pairs,
+                results.len(),
+                bd_pass,
+                bd_fail,
+                swap_pass,
+                swap_fail
+            );
+        }
 
         Ok(())
     }

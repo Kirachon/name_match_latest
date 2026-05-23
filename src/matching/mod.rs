@@ -25,14 +25,30 @@ pub mod advanced_matcher;
 // Cascade matching workflow (L1-L11 sequential execution)
 pub mod cascade;
 
+pub fn gpu_fuzzy_direct_hash_prefilter_indices(
+    people1: &[Person],
+    people2: &[Person],
+    part_strategy: &str,
+) -> anyhow::Result<Vec<Vec<usize>>> {
+    #[cfg(feature = "gpu")]
+    {
+        return gpu::fuzzy_direct_gpu_hash_prefilter_indices(people1, people2, part_strategy);
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = (people1, people2, part_strategy);
+        anyhow::bail!("GPU fuzzy direct hash prefilter requires the gpu feature");
+    }
+}
+
 // Shared helper functions (normalization, similarity scoring)
 mod helpers;
-use helpers::{metaphone_pct, normalize_simple, sim_levenshtein_pct, soundex4_ascii};
-// GPU-only imports for phonetic preprocessing
-#[cfg(feature = "gpu")]
-use helpers::normalize_for_phonetic;
-#[cfg(feature = "gpu")]
+use helpers::{
+    metaphone_pct, normalize_for_phonetic, normalize_simple, sim_levenshtein_pct, soundex4_ascii,
+};
 use rphonetic::{DoubleMetaphone, Encoder};
+
+const FUZZY_PREFILTER_KEEP_THRESHOLD: f64 = 84.0;
 
 fn fuzzy_compare_names_new(
     n1_first: Option<&str>,
@@ -110,9 +126,11 @@ fn fuzzy_compare_names_new(
     None
 }
 
-#[allow(dead_code)]
-fn compare_persons_new(p1: &Person, p2: &Person) -> Option<(f64, String)> {
-    let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
+fn compare_persons_new_with_swap(
+    p1: &Person,
+    p2: &Person,
+    allow_swap: bool,
+) -> Option<(f64, String)> {
     match (p1.birthdate.as_ref(), p2.birthdate.as_ref()) {
         (Some(d1), Some(d2)) => {
             if d1 != d2
@@ -135,8 +153,20 @@ fn compare_persons_new(p1: &Person, p2: &Person) -> Option<(f64, String)> {
     )
 }
 
-fn compare_persons_no_mid(p1: &Person, p2: &Person) -> Option<(f64, String)> {
-    let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
+#[allow(dead_code)]
+fn compare_persons_new(p1: &Person, p2: &Person) -> Option<(f64, String)> {
+    compare_persons_new_with_swap(
+        p1,
+        p2,
+        crate::matching::birthdate_matcher::allow_birthdate_swap(),
+    )
+}
+
+fn compare_persons_no_mid_with_swap(
+    p1: &Person,
+    p2: &Person,
+    allow_swap: bool,
+) -> Option<(f64, String)> {
     match (p1.birthdate.as_ref(), p2.birthdate.as_ref()) {
         (Some(d1), Some(d2)) => {
             if d1 != d2
@@ -154,6 +184,14 @@ fn compare_persons_no_mid(p1: &Person, p2: &Person) -> Option<(f64, String)> {
         p1.last_name.as_deref(),
         p2.first_name.as_deref(),
         p2.last_name.as_deref(),
+    )
+}
+
+fn compare_persons_no_mid(p1: &Person, p2: &Person) -> Option<(f64, String)> {
+    compare_persons_no_mid_with_swap(
+        p1,
+        p2,
+        crate::matching::birthdate_matcher::allow_birthdate_swap(),
     )
 }
 
@@ -245,6 +283,152 @@ fn fuzzy_compare_names_no_mid(
                 &normalize_simple(n1_last.unwrap_or("")),
                 &normalize_simple(n2_last.unwrap_or("")),
             ) as usize;
+            if ld_first <= 2 && ld_last <= 2 {
+                return Some((avg, "CASE 3".to_string()));
+            }
+        }
+        return Some((avg, "CASE 2".to_string()));
+    }
+    None
+}
+
+#[derive(Clone)]
+struct CpuFuzzyCache {
+    simple_full: String,
+    simple_full_no_mid: String,
+    simple_first: String,
+    simple_mid: String,
+    simple_last: String,
+    dmeta_full: String,
+    dmeta_no_mid: String,
+}
+
+fn dmeta_code_from_simple(s: &str) -> String {
+    let phonetic = normalize_for_phonetic(s);
+    if phonetic.is_empty() {
+        return String::new();
+    }
+    match std::panic::catch_unwind(|| DoubleMetaphone::default().encode(&phonetic)) {
+        Ok(code) => code.to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+fn build_cpu_fuzzy_cache(p: &Person) -> CpuFuzzyCache {
+    let raw_first = p.first_name.as_deref().unwrap_or("");
+    let raw_mid = p.middle_name.as_deref().unwrap_or("");
+    let raw_last = p.last_name.as_deref().unwrap_or("");
+
+    let simple_first = normalize_simple(raw_first);
+    let simple_mid = normalize_simple(raw_mid);
+    let simple_last = normalize_simple(raw_last);
+    let simple_full = normalize_simple(&format!("{} {} {}", raw_first, raw_mid, raw_last));
+    let simple_full_no_mid = normalize_simple(&format!("{} {}", raw_first, raw_last));
+
+    let dmeta_full = dmeta_code_from_simple(&simple_full);
+    let dmeta_no_mid = dmeta_code_from_simple(&simple_full_no_mid);
+
+    CpuFuzzyCache {
+        simple_full,
+        simple_full_no_mid,
+        simple_first,
+        simple_mid,
+        simple_last,
+        dmeta_full,
+        dmeta_no_mid,
+    }
+}
+
+fn classify_cached_full(c1: &CpuFuzzyCache, c2: &CpuFuzzyCache) -> Option<(f64, String)> {
+    if c1.simple_full.trim().is_empty() || c2.simple_full.trim().is_empty() {
+        return None;
+    }
+
+    if c1.simple_full == c2.simple_full {
+        return Some((100.0, "DIRECT MATCH".to_string()));
+    }
+
+    let lev = sim_levenshtein_pct(&c1.simple_full, &c2.simple_full);
+    let jw = jaro_winkler(&c1.simple_full, &c2.simple_full) * 100.0;
+    let mp = if !c1.dmeta_full.is_empty()
+        && !c2.dmeta_full.is_empty()
+        && c1.dmeta_full == c2.dmeta_full
+    {
+        100.0
+    } else {
+        0.0
+    };
+
+    if lev >= 85.0 && jw >= 85.0 && mp == 100.0 {
+        let avg = (lev + jw + mp) / 3.0;
+        return Some((avg, "CASE 1".to_string()));
+    }
+
+    let mut pass = 0;
+    if lev >= 85.0 {
+        pass += 1;
+    }
+    if jw >= 85.0 {
+        pass += 1;
+    }
+    if mp == 100.0 {
+        pass += 1;
+    }
+    if pass >= 2 {
+        let avg = (lev + jw + mp) / 3.0;
+        if avg >= 88.0 {
+            let ld_first = levenshtein(&c1.simple_first, &c2.simple_first) as usize;
+            let ld_last = levenshtein(&c1.simple_last, &c2.simple_last) as usize;
+            let ld_mid = levenshtein(&c1.simple_mid, &c2.simple_mid) as usize;
+            if ld_first <= 2 && ld_last <= 2 && ld_mid <= 2 {
+                return Some((avg, "CASE 3".to_string()));
+            }
+        }
+        return Some((avg, "CASE 2".to_string()));
+    }
+    None
+}
+
+fn classify_cached_no_mid(c1: &CpuFuzzyCache, c2: &CpuFuzzyCache) -> Option<(f64, String)> {
+    if c1.simple_full_no_mid.trim().is_empty() || c2.simple_full_no_mid.trim().is_empty() {
+        return None;
+    }
+
+    if c1.simple_full_no_mid == c2.simple_full_no_mid {
+        return Some((100.0, "DIRECT MATCH".to_string()));
+    }
+
+    let lev = sim_levenshtein_pct(&c1.simple_full_no_mid, &c2.simple_full_no_mid);
+    let jw = jaro_winkler(&c1.simple_full_no_mid, &c2.simple_full_no_mid) * 100.0;
+    let mp = if !c1.dmeta_no_mid.is_empty()
+        && !c2.dmeta_no_mid.is_empty()
+        && c1.dmeta_no_mid == c2.dmeta_no_mid
+    {
+        100.0
+    } else {
+        0.0
+    };
+
+    if lev >= 85.0 && jw >= 85.0 && mp == 100.0 {
+        let avg = (lev + jw + mp) / 3.0;
+        return Some((avg, "CASE 1".to_string()));
+    }
+
+    let mut pass = 0;
+    if lev >= 85.0 {
+        pass += 1;
+    }
+    if jw >= 85.0 {
+        pass += 1;
+    }
+    if mp == 100.0 {
+        pass += 1;
+    }
+    if pass >= 2 {
+        let avg = (lev + jw + mp) / 3.0;
+        if avg >= 88.0 {
+            let ld_first = levenshtein(&c1.simple_first, &c2.simple_first) as usize;
+            let ld_last = levenshtein(&c1.simple_last, &c2.simple_last) as usize;
             if ld_first <= 2 && ld_last <= 2 {
                 return Some((avg, "CASE 3".to_string()));
             }
@@ -821,6 +1005,10 @@ where
     let mut emitted = 0usize;
     let mut row_id: i64 = 1;
     let mut processed_hh = 0usize;
+    let mut last_progress = 0usize;
+    let mut last_progress_at = Instant::now();
+    let progress_every = 200usize;
+    let progress_min_interval = Duration::from_millis(500);
 
     let mo_cpu = MatchOptions {
         backend: ComputeBackend::Cpu,
@@ -952,20 +1140,29 @@ where
             }
         }
         processed_hh += 1;
-        let mem = memory_stats_mb();
-        on_progress(ProgressUpdate {
-            processed: processed_hh,
-            total: total_hh,
-            percent: (processed_hh as f32 / total_hh as f32) * 100.0,
-            eta_secs: 0,
-            mem_used_mb: mem.used_mb,
-            mem_avail_mb: mem.avail_mb,
-            stage: "adv_l12_inmem_stream",
-            batch_size_current: None,
-            gpu_total_mb: 0,
-            gpu_free_mb: 0,
-            gpu_active: matches!(opts.backend, ComputeBackend::Gpu),
-        });
+        if should_emit_progress(
+            processed_hh,
+            total_hh,
+            &mut last_progress,
+            &mut last_progress_at,
+            progress_every,
+            progress_min_interval,
+        ) {
+            let mem = memory_stats_mb();
+            on_progress(ProgressUpdate {
+                processed: processed_hh,
+                total: total_hh,
+                percent: (processed_hh as f32 / total_hh as f32) * 100.0,
+                eta_secs: 0,
+                mem_used_mb: mem.used_mb,
+                mem_avail_mb: mem.avail_mb,
+                stage: "adv_l12_inmem_stream",
+                batch_size_current: None,
+                gpu_total_mb: 0,
+                gpu_free_mb: 0,
+                gpu_active: matches!(opts.backend, ComputeBackend::Gpu),
+            });
+        }
     }
 
     Ok(emitted)
@@ -1016,6 +1213,29 @@ pub struct ProgressUpdate {
     pub gpu_free_mb: u64,
     #[allow(dead_code)]
     pub gpu_active: bool,
+}
+
+fn should_emit_progress(
+    processed: usize,
+    total: usize,
+    last_processed: &mut usize,
+    last_emit: &mut Instant,
+    min_rows: usize,
+    min_interval: Duration,
+) -> bool {
+    if processed >= total {
+        *last_processed = processed;
+        *last_emit = Instant::now();
+        return true;
+    }
+    if processed.saturating_sub(*last_processed) >= min_rows
+        || last_emit.elapsed() >= min_interval
+    {
+        *last_processed = processed;
+        *last_emit = Instant::now();
+        return true;
+    }
+    false
 }
 
 // --- Optional GPU backend abstraction ---
@@ -1118,16 +1338,14 @@ where
                         gpu_free_mb: 0,
                         gpu_active: true,
                     });
-                    let n1: Vec<NormalizedPerson> =
-                        table1.par_iter().map(normalize_person).collect();
-                    let n2: Vec<NormalizedPerson> =
-                        table2.par_iter().map(normalize_person).collect();
+                    let cache1: Vec<CpuFuzzyCache> =
+                        table1.par_iter().map(build_cpu_fuzzy_cache).collect();
+                    let cache2: Vec<CpuFuzzyCache> =
+                        table2.par_iter().map(build_cpu_fuzzy_cache).collect();
                     let mut out: Vec<MatchPair> = Vec::new();
                     let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
                     for (i, p) in table1.iter().enumerate() {
-                        let n = &n1[i];
                         for &j in cand_lists.get(i).map(|v| v.as_slice()).unwrap_or(&[]) {
-                            let n2p = &n2[j];
                             // Use birthdate_matches_naive to support month/day swap when enabled
                             let bd_match = match (p.birthdate, table2[j].birthdate) {
                                 (Some(b1), Some(b2)) => {
@@ -1141,31 +1359,16 @@ where
                                 continue;
                             }
                             // GPU-equivalent preliminary filter (max of Levenshtein and Jaro-Winkler) at 85.0
-                            let s1 = normalize_simple(&format!(
-                                "{} {} {}",
-                                p.first_name.as_deref().unwrap_or(""),
-                                p.middle_name.as_deref().unwrap_or(""),
-                                p.last_name.as_deref().unwrap_or("")
-                            ));
-                            let s2 = normalize_simple(&format!(
-                                "{} {} {}",
-                                table2[j].first_name.as_deref().unwrap_or(""),
-                                table2[j].middle_name.as_deref().unwrap_or(""),
-                                table2[j].last_name.as_deref().unwrap_or("")
-                            ));
+                            let s1 = &cache1[i].simple_full;
+                            let s2 = &cache2[j].simple_full;
                             let lev = sim_levenshtein_pct(&s1, &s2);
                             let jw = jaro_winkler(&s1, &s2) * 100.0;
                             if lev.max(jw) < 85.0 {
                                 continue;
                             }
-                            if let Some((score, label)) = fuzzy_compare_names_new(
-                                n.first_name.as_deref(),
-                                n.middle_name.as_deref(),
-                                n.last_name.as_deref(),
-                                n2p.first_name.as_deref(),
-                                n2p.middle_name.as_deref(),
-                                n2p.last_name.as_deref(),
-                            ) {
+                            if let Some((score, label)) =
+                                classify_cached_full(&cache1[i], &cache2[j])
+                            {
                                 let q = &table2[j];
                                 let pair = MatchPair {
                                     person1: p.clone(),
@@ -2107,6 +2310,8 @@ where
     if n1.is_empty() || n2.is_empty() {
         return Vec::new();
     }
+    let cache1: Vec<CpuFuzzyCache> = t1.par_iter().map(build_cpu_fuzzy_cache).collect();
+    let cache2: Vec<CpuFuzzyCache> = t2.par_iter().map(build_cpu_fuzzy_cache).collect();
 
     #[derive(Hash, Eq, PartialEq)]
     struct BKey(u16, u8, u8, [u8; 4]); // (birth year, first init, last init, last soundex)
@@ -2138,9 +2343,22 @@ where
 
     let total = n1.len();
     let mut results: Vec<MatchPair> = Vec::new();
+    let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
+    let mut last_progress = 0usize;
+    let mut last_progress_at = Instant::now();
+    let progress_every = 2000usize;
+    let progress_min_interval = Duration::from_millis(500);
+    let mut set: HashSet<usize> = HashSet::new();
     for (i, p1) in n1.iter().enumerate() {
         // Progress (best-effort)
-        if i % 1000 == 0 {
+        if should_emit_progress(
+            i,
+            total,
+            &mut last_progress,
+            &mut last_progress_at,
+            progress_every,
+            progress_min_interval,
+        ) {
             let mem = memory_stats_mb();
             on_progress(ProgressUpdate {
                 processed: i,
@@ -2175,7 +2393,7 @@ where
             .unwrap_or(b'?')
             .to_ascii_uppercase();
         let sx = soundex4_ascii(ln_str);
-        let mut set: HashSet<usize> = HashSet::new();
+        set.clear();
         if let Some(v) = block.get(&BKey(year, fi, li, sx)) {
             set.extend(v.iter().copied());
         }
@@ -2195,8 +2413,7 @@ where
         if set.is_empty() {
             continue;
         }
-        let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
-        for j in set.into_iter() {
+        for j in set.iter().copied() {
             // Enforce birthdate equality at Person level (with optional month/day swap)
             let bd_match = match (t1[i].birthdate, t2[j].birthdate) {
                 (Some(b1), Some(b2)) => {
@@ -2207,7 +2424,7 @@ where
             if !bd_match {
                 continue;
             }
-            if let Some((score, label)) = compare_persons_no_mid(&t1[i], &t2[j]) {
+            if let Some((score, label)) = classify_cached_no_mid(&cache1[i], &cache2[j]) {
                 results.push(MatchPair {
                     person1: t1[i].clone(),
                     person2: t2[j].clone(),
@@ -2222,7 +2439,7 @@ where
     results
 }
 /// CPU implementation that replicates GPU candidate generation and prefilter for Option 3 (Fuzzy)
-pub(crate) fn match_fuzzy_cpu_gpu_equivalent<F>(
+pub fn match_fuzzy_cpu_gpu_equivalent<F>(
     t1: &[Person],
     t2: &[Person],
     on_progress: &F,
@@ -2267,12 +2484,27 @@ where
         block.entry(BKey(year, fi, li, sx)).or_default().push(j);
     }
 
-    // No caches needed; compute prelim strings directly to mirror GPU prefilter behavior
+    // Precompute cached normalization for CPU classification and prelim filters.
+    let cache1: Vec<CpuFuzzyCache> = t1.par_iter().map(build_cpu_fuzzy_cache).collect();
+    let cache2: Vec<CpuFuzzyCache> = t2.par_iter().map(build_cpu_fuzzy_cache).collect();
 
     let total = n1.len();
     let mut results: Vec<MatchPair> = Vec::new();
+    let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
+    let mut last_progress = 0usize;
+    let mut last_progress_at = Instant::now();
+    let progress_every = 2000usize;
+    let progress_min_interval = Duration::from_millis(500);
+    let mut set: HashSet<usize> = HashSet::new();
     for (i, p1) in n1.iter().enumerate() {
-        if i % 1000 == 0 {
+        if should_emit_progress(
+            i,
+            total,
+            &mut last_progress,
+            &mut last_progress_at,
+            progress_every,
+            progress_min_interval,
+        ) {
             let mem = memory_stats_mb();
             on_progress(ProgressUpdate {
                 processed: i,
@@ -2307,7 +2539,7 @@ where
             .unwrap_or(b'?')
             .to_ascii_uppercase();
         let sx = soundex4_ascii(ln_str);
-        let mut set: HashSet<usize> = HashSet::new();
+        set.clear();
         if let Some(v) = block.get(&BKey(year, fi, li, sx)) {
             set.extend(v.iter().copied());
         }
@@ -2329,25 +2561,14 @@ where
             continue;
         }
 
-        let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
-        for j in set.into_iter() {
+        let s1 = &cache1[i].simple_full;
+        for j in set.iter().copied() {
             // Compute GPU-equivalent preliminary score using full normalized strings
-            let s1 = normalize_simple(&format!(
-                "{} {} {}",
-                t1[i].first_name.as_deref().unwrap_or(""),
-                t1[i].middle_name.as_deref().unwrap_or(""),
-                t1[i].last_name.as_deref().unwrap_or("")
-            ));
-            let s2 = normalize_simple(&format!(
-                "{} {} {}",
-                t2[j].first_name.as_deref().unwrap_or(""),
-                t2[j].middle_name.as_deref().unwrap_or(""),
-                t2[j].last_name.as_deref().unwrap_or("")
-            ));
+            let s2 = &cache2[j].simple_full;
             let lev = sim_levenshtein_pct(&s1, &s2);
             let jw = jaro_winkler(&s1, &s2) * 100.0;
             let prelim = lev.max(jw);
-            if prelim < 85.0 {
+            if prelim < FUZZY_PREFILTER_KEEP_THRESHOLD {
                 continue;
             }
             // Birthdate equality enforced (with optional month/day swap)
@@ -2361,7 +2582,7 @@ where
                 continue;
             }
             // Authoritative classification via CPU path
-            if let Some((score, label)) = compare_persons_new(&t1[i], &t2[j]) {
+            if let Some((score, label)) = classify_cached_full(&cache1[i], &cache2[j]) {
                 results.push(MatchPair {
                     person1: t1[i].clone(),
                     person2: t2[j].clone(),
@@ -2377,7 +2598,7 @@ where
 }
 
 /// CPU implementation that replicates GPU candidate generation and prefilter for Option 4 (FuzzyNoMiddle)
-pub(crate) fn match_fuzzy_no_mid_cpu_gpu_equivalent<F>(
+pub fn match_fuzzy_no_mid_cpu_gpu_equivalent<F>(
     t1: &[Person],
     t2: &[Person],
     on_progress: &F,
@@ -2404,12 +2625,27 @@ where
         }
     }
 
-    // No caches needed here; compute prelim strings directly (match GPU prefilter behavior)
+    // Precompute cached normalization for CPU classification and prelim filters.
+    let cache1: Vec<CpuFuzzyCache> = t1.par_iter().map(build_cpu_fuzzy_cache).collect();
+    let cache2: Vec<CpuFuzzyCache> = t2.par_iter().map(build_cpu_fuzzy_cache).collect();
 
     let total = n1.len();
     let mut results: Vec<MatchPair> = Vec::new();
+    let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
+    let mut last_progress = 0usize;
+    let mut last_progress_at = Instant::now();
+    let progress_every = 2000usize;
+    let progress_min_interval = Duration::from_millis(500);
+    let mut list: Vec<usize> = Vec::new();
     for (i, p1) in n1.iter().enumerate() {
-        if i % 1000 == 0 {
+        if should_emit_progress(
+            i,
+            total,
+            &mut last_progress,
+            &mut last_progress_at,
+            progress_every,
+            progress_min_interval,
+        ) {
             let mem = memory_stats_mb();
             on_progress(ProgressUpdate {
                 processed: i,
@@ -2428,9 +2664,11 @@ where
         let Some(d) = p1.birthdate.as_ref() else {
             continue;
         };
-        let allow_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
         // Get candidates matching exact date or swapped date (if swap enabled)
-        let mut list: Vec<usize> = by_bd2.get(d).cloned().unwrap_or_default();
+        list.clear();
+        if let Some(v) = by_bd2.get(d) {
+            list.extend(v.iter().copied());
+        }
         if allow_swap {
             if let Some(swapped) = crate::matching::birthdate_matcher::swap_month_day(*d) {
                 if swapped != *d {
@@ -2444,26 +2682,18 @@ where
             continue;
         }
 
-        for j in list.into_iter() {
+        let s1 = &cache1[i].simple_full_no_mid;
+        for j in list.iter().copied() {
             // Preliminary filter using first+last names only (no middle) to match compare_persons_no_mid() semantics
-            let s1 = normalize_simple(&format!(
-                "{} {}",
-                t1[i].first_name.as_deref().unwrap_or(""),
-                t1[i].last_name.as_deref().unwrap_or("")
-            ));
-            let s2 = normalize_simple(&format!(
-                "{} {}",
-                t2[j].first_name.as_deref().unwrap_or(""),
-                t2[j].last_name.as_deref().unwrap_or("")
-            ));
+            let s2 = &cache2[j].simple_full_no_mid;
             let lev = sim_levenshtein_pct(&s1, &s2);
             let jw = jaro_winkler(&s1, &s2) * 100.0;
             let prelim = lev.max(jw);
-            if prelim < 85.0 {
+            if prelim < FUZZY_PREFILTER_KEEP_THRESHOLD {
                 continue;
             }
             // Final classification: Option 4 semantics (no middle)
-            if let Some((score, label)) = compare_persons_no_mid(&t1[i], &t2[j]) {
+            if let Some((score, label)) = classify_cached_no_mid(&cache1[i], &cache2[j]) {
                 results.push(MatchPair {
                     person1: t1[i].clone(),
                     person2: t2[j].clone(),
@@ -2747,22 +2977,47 @@ mod gpu {
     use anyhow::{Result, anyhow};
     use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
     use cudarc::nvrtc::compile_ptx;
+    use std::cell::Cell;
 
     pub mod batch;
     pub mod dynamic_tuner;
 
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static NO_MID_CLASSIFY: AtomicBool = AtomicBool::new(false);
+    thread_local! {
+        static NO_MID_CLASSIFY: Cell<bool> = Cell::new(false);
+    }
     #[inline]
     pub fn gpu_no_mid_mode() -> bool {
-        NO_MID_CLASSIFY.load(Ordering::Relaxed)
+        NO_MID_CLASSIFY.with(|flag| flag.get())
     }
     #[inline]
     pub fn with_no_mid_classification<T, F: FnOnce() -> T>(f: F) -> T {
-        let prev = NO_MID_CLASSIFY.swap(true, Ordering::SeqCst);
-        let out = f();
-        NO_MID_CLASSIFY.store(prev, Ordering::SeqCst);
-        out
+        NO_MID_CLASSIFY.with(|flag| {
+            let prev = flag.replace(true);
+            let out = f();
+            flag.set(prev);
+            out
+        })
+    }
+
+    #[inline]
+    fn fuzzy_cache_name(cache: &FuzzyCache) -> &str {
+        if gpu_no_mid_mode() {
+            &cache.simple_full_no_mid
+        } else {
+            &cache.simple_full
+        }
+    }
+
+    #[inline]
+    fn full_middle_len(p: &Person) -> usize {
+        p.middle_name
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('.')
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .count()
     }
 
     const MAX_STR: usize = 64; // truncate names for GPU DP to keep registers/local mem bounded
@@ -2913,23 +3168,28 @@ mod gpu {
     #[derive(Clone)]
     struct FuzzyCache {
         simple_full: String,
+        simple_full_no_mid: String,
         simple_first: String,
         simple_mid: String,
         simple_last: String,
         phonetic_full: String,
         dmeta_code: String, // empty if encode failed/panicked/empty
+        dmeta_code_no_mid: String, // empty if encode failed/panicked/empty
     }
 
     fn build_cache_from_person(p: &Person) -> FuzzyCache {
-        let simple_first = normalize_simple(p.first_name.as_deref().unwrap_or(""));
-        let simple_mid = normalize_simple(p.middle_name.as_deref().unwrap_or(""));
-        let simple_last = normalize_simple(p.last_name.as_deref().unwrap_or(""));
+        let raw_first = p.first_name.as_deref().unwrap_or("");
+        let raw_mid = p.middle_name.as_deref().unwrap_or("");
+        let raw_last = p.last_name.as_deref().unwrap_or("");
+
+        let simple_first = normalize_simple(raw_first);
+        let simple_mid = normalize_simple(raw_mid);
+        let simple_last = normalize_simple(raw_last);
         let simple_full = normalize_simple(&format!(
             "{} {} {}",
-            p.first_name.as_deref().unwrap_or(""),
-            p.middle_name.as_deref().unwrap_or(""),
-            p.last_name.as_deref().unwrap_or("")
+            raw_first, raw_mid, raw_last
         ));
+        let simple_full_no_mid = normalize_simple(&format!("{} {}", raw_first, raw_last));
         // match metaphone_pct() path: normalize_for_phonetic on the full name string
         let phonetic_full = normalize_for_phonetic(&simple_full);
         let dmeta_code = if phonetic_full.is_empty() {
@@ -2941,13 +3201,25 @@ mod gpu {
                 Err(_) => String::new(),
             }
         };
+        let phonetic_no_mid = normalize_for_phonetic(&simple_full_no_mid);
+        let dmeta_code_no_mid = if phonetic_no_mid.is_empty() {
+            String::new()
+        } else {
+            match std::panic::catch_unwind(|| DoubleMetaphone::default().encode(&phonetic_no_mid))
+            {
+                Ok(code) => code.to_string(),
+                Err(_) => String::new(),
+            }
+        };
         FuzzyCache {
             simple_full,
+            simple_full_no_mid,
             simple_first,
             simple_mid,
             simple_last,
             phonetic_full,
             dmeta_code,
+            dmeta_code_no_mid,
         }
     }
 
@@ -2992,6 +3264,52 @@ mod gpu {
                 let ld_last = levenshtein(&c1.simple_last, &c2.simple_last) as usize;
                 let ld_mid = levenshtein(&c1.simple_mid, &c2.simple_mid) as usize;
                 if ld_first <= 2 && ld_last <= 2 && ld_mid <= 2 {
+                    return Some((avg, "CASE 3".to_string()));
+                }
+            }
+            return Some((avg, "CASE 2".to_string()));
+        }
+        None
+    }
+
+    fn classify_pair_cached_no_mid(c1: &FuzzyCache, c2: &FuzzyCache) -> Option<(f64, String)> {
+        if c1.simple_full_no_mid.trim().is_empty() || c2.simple_full_no_mid.trim().is_empty() {
+            return None;
+        }
+        if c1.simple_full_no_mid == c2.simple_full_no_mid {
+            return Some((100.0, "DIRECT MATCH".to_string()));
+        }
+        let lev = sim_levenshtein_pct(&c1.simple_full_no_mid, &c2.simple_full_no_mid);
+        let jw = jaro_winkler(&c1.simple_full_no_mid, &c2.simple_full_no_mid) * 100.0;
+        let mp = if !c1.dmeta_code_no_mid.is_empty()
+            && !c2.dmeta_code_no_mid.is_empty()
+            && c1.dmeta_code_no_mid == c2.dmeta_code_no_mid
+        {
+            100.0
+        } else {
+            0.0
+        };
+
+        if lev >= 85.0 && jw >= 85.0 && mp == 100.0 {
+            let avg = (lev + jw + mp) / 3.0;
+            return Some((avg, "CASE 1".to_string()));
+        }
+        let mut pass = 0;
+        if lev >= 85.0 {
+            pass += 1;
+        }
+        if jw >= 85.0 {
+            pass += 1;
+        }
+        if mp == 100.0 {
+            pass += 1;
+        }
+        if pass >= 2 {
+            let avg = (lev + jw + mp) / 3.0;
+            if avg >= 88.0 {
+                let ld_first = levenshtein(&c1.simple_first, &c2.simple_first) as usize;
+                let ld_last = levenshtein(&c1.simple_last, &c2.simple_last) as usize;
+                if ld_first <= 2 && ld_last <= 2 {
                     return Some((avg, "CASE 3".to_string()));
                 }
             }
@@ -3198,27 +3516,110 @@ mod gpu {
         }
     }
 
-    pub fn hash_fnv1a64_batch(hctx: &GpuHashContext, strings: &[String]) -> Result<Vec<u64>> {
+    fn gpu_pinned_host_env() -> bool {
+        std::env::var("NAME_MATCHER_GPU_PINNED_HOST")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true)
+    }
+
+    pub fn hash_fnv1a64_batch(
+        hctx: &GpuHashContext,
+        strings: &[String],
+        use_pinned_host: bool,
+    ) -> Result<Vec<u64>> {
         let n = strings.len();
         if n == 0 {
             return Ok(Vec::new());
         }
+        let mut use_pinned = use_pinned_host;
+        let total_len: usize = strings.iter().map(|s| s.len()).sum();
         let mut offsets: Vec<i32> = Vec::with_capacity(n);
         let mut lengths: Vec<i32> = Vec::with_capacity(n);
         let mut flat: Vec<u8> = Vec::new();
-        flat.reserve(strings.iter().map(|s| s.len()).sum());
-        let mut cur = 0i32;
-        for s in strings {
-            offsets.push(cur);
-            let bytes = s.as_bytes();
-            lengths.push(bytes.len() as i32);
-            flat.extend_from_slice(bytes);
-            cur += bytes.len() as i32;
+        let mut pinned_flat: Option<cudarc::driver::PinnedHostSlice<u8>> = None;
+        let mut pinned_offsets: Option<cudarc::driver::PinnedHostSlice<i32>> = None;
+        let mut pinned_lengths: Option<cudarc::driver::PinnedHostSlice<i32>> = None;
+
+        if use_pinned && total_len == 0 {
+            use_pinned = false;
+        }
+        if use_pinned && total_len > 0 {
+            let pinned_setup = (|| -> Result<()> {
+                let mut pflat = unsafe { hctx.ctx.alloc_pinned::<u8>(total_len) }?;
+                let mut poff = unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?;
+                let mut plen = unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?;
+                let flat_slice = pflat.as_mut_slice()?;
+                let offsets_slice = poff.as_mut_slice()?;
+                let lengths_slice = plen.as_mut_slice()?;
+                let mut cur = 0usize;
+                for (idx, s) in strings.iter().enumerate() {
+                    offsets_slice[idx] = cur as i32;
+                    let bytes = s.as_bytes();
+                    lengths_slice[idx] = bytes.len() as i32;
+                    let end = cur + bytes.len();
+                    if end > flat_slice.len() {
+                        return Err(anyhow!("Pinned host buffer too small"));
+                    }
+                    flat_slice[cur..end].copy_from_slice(bytes);
+                    cur = end;
+                }
+                pinned_flat = Some(pflat);
+                pinned_offsets = Some(poff);
+                pinned_lengths = Some(plen);
+                Ok(())
+            })();
+            if let Err(e) = pinned_setup {
+                log::warn!(
+                    "[GPU] Pinned host allocation failed ({}); falling back to pageable host memory",
+                    e
+                );
+                use_pinned = false;
+            } else {
+                static PINNED_LOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !PINNED_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::info!("[GPU] Using pinned host memory for hash staging buffers");
+                }
+            }
+        }
+
+        if !use_pinned {
+            flat.reserve(total_len);
+            let mut cur = 0i32;
+            for s in strings {
+                offsets.push(cur);
+                let bytes = s.as_bytes();
+                lengths.push(bytes.len() as i32);
+                flat.extend_from_slice(bytes);
+                cur += bytes.len() as i32;
+            }
         }
         let stream = hctx.ctx.default_stream();
-        let d_buf = stream.memcpy_stod(flat.as_slice())?;
-        let d_off = stream.memcpy_stod(offsets.as_slice())?;
-        let d_len = stream.memcpy_stod(lengths.as_slice())?;
+        let d_buf = if use_pinned {
+            let buf = pinned_flat
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned host buffer missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(flat.as_slice())?
+        };
+        let d_off = if use_pinned {
+            let buf = pinned_offsets
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned host offsets missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(offsets.as_slice())?
+        };
+        let d_len = if use_pinned {
+            let buf = pinned_lengths
+                .as_ref()
+                .ok_or_else(|| anyhow!("Pinned host lengths missing"))?;
+            stream.memcpy_stod(buf)?
+        } else {
+            stream.memcpy_stod(lengths.as_slice())?
+        };
         let mut d_out = stream.alloc_zeros::<u64>(n)?;
 
         // [GPU_OPT1] Adaptive block size based on GPU architecture
@@ -3276,6 +3677,7 @@ mod gpu {
         strings: &[String],
         budget_mb: u64,
         reserve_mb: u64,
+        use_pinned_host: bool,
     ) -> Result<Vec<u64>> {
         fn is_cuda_oom(e: &anyhow::Error) -> bool {
             let s = e.to_string().to_ascii_lowercase();
@@ -3318,7 +3720,7 @@ mod gpu {
             let mut done = false;
             while !done {
                 let tile = &strings[lo..hi];
-                match hash_fnv1a64_batch(hctx, tile) {
+                match hash_fnv1a64_batch(hctx, tile, use_pinned_host) {
                     Ok(mut v) => {
                         // GPU kernel tile executed
                         super::OPT7_GPU_KERNEL_TILES
@@ -3369,6 +3771,7 @@ mod gpu {
         _part_strategy: &str,
     ) -> Result<Vec<Vec<usize>>> {
         let ctx = GpuHashContext::get()?;
+        let use_pinned_host = gpu_pinned_host_env();
         use chrono::Datelike;
         // Build composite keys (YEAR|FI|LI|SNDX) for inner (people2), primary only (no synthetic fallbacks)
         let mut keys2: Vec<String> = Vec::new();
@@ -3404,7 +3807,7 @@ mod gpu {
         } else {
             (free_mb / 2).max(64)
         };
-        let h2 = hash_fnv1a64_batch_tiled(&ctx, &keys2, budget_mb, 64)?;
+        let h2 = hash_fnv1a64_batch_tiled(&ctx, &keys2, budget_mb, 64, use_pinned_host)?;
         use std::collections::HashMap as Map;
         let mut map: Map<u64, Vec<usize>> = Map::with_capacity(h2.len());
         for (k, &h) in h2.iter().enumerate() {
@@ -3451,7 +3854,7 @@ mod gpu {
             keys1.push(k2);
             owner.push(i);
         }
-        let h1 = hash_fnv1a64_batch_tiled(&ctx, &keys1, budget_mb, 64)?;
+        let h1 = hash_fnv1a64_batch_tiled(&ctx, &keys1, budget_mb, 64, use_pinned_host)?;
         let mut chosen: Vec<bool> = vec![false; people1.len()];
         for (pos, &h) in h1.iter().enumerate() {
             let i = owner[pos];
@@ -3478,6 +3881,7 @@ mod gpu {
         people2: &[super::Person],
     ) -> Result<Vec<Vec<usize>>> {
         let ctx = GpuHashContext::get()?;
+        let use_pinned_host = gpu_pinned_host_env();
         // reset runtime counters for Option 7 GPU pre-pass
         super::opt7_gpu_reset_counters();
         // Build inner keys with type tags to share one hash map
@@ -3540,7 +3944,7 @@ mod gpu {
         } else {
             (free_mb / 2).max(64)
         };
-        let h2 = hash_fnv1a64_batch_tiled(&ctx, &keys2, budget_mb, 64)?;
+        let h2 = hash_fnv1a64_batch_tiled(&ctx, &keys2, budget_mb, 64, use_pinned_host)?;
         use std::collections::HashMap as Map;
         let mut map: Map<u64, Vec<usize>> = Map::with_capacity(h2.len());
         for (k, &h) in h2.iter().enumerate() {
@@ -3585,7 +3989,7 @@ mod gpu {
                 owner.push(i);
             }
         }
-        let h1 = hash_fnv1a64_batch_tiled(&ctx, &keys1, budget_mb, 64)?;
+        let h1 = hash_fnv1a64_batch_tiled(&ctx, &keys1, budget_mb, 64, use_pinned_host)?;
         let mut seen: Vec<std::collections::HashSet<usize>> =
             vec![std::collections::HashSet::new(); people1.len()];
         for (pos, &h) in h1.iter().enumerate() {
@@ -4223,6 +4627,7 @@ mod gpu {
             return Err(anyhow!("Fuzzy not supported"));
         }
         let ctx = GpuHashContext::get()?;
+        let use_pinned_host = gpu_pinned_host_env();
         let (gt, gf) = ctx.mem_info_mb();
         // Normalize both tables (CPU)
         let n1: Vec<NormalizedPerson> = t1.par_iter().map(|p| normalize_person(p)).collect();
@@ -4261,7 +4666,8 @@ mod gpu {
             gpu_free_mb: gf,
             gpu_active: true,
         });
-        let inner_hashes = hash_fnv1a64_batch_tiled(&ctx, &key_strs, budget_mb, 64)?;
+        let inner_hashes =
+            hash_fnv1a64_batch_tiled(&ctx, &key_strs, budget_mb, 64, use_pinned_host)?;
         let mut index: std::collections::HashMap<u64, Vec<usize>> =
             std::collections::HashMap::new();
         for (j, &h) in inner_hashes.iter().enumerate() {
@@ -4300,7 +4706,8 @@ mod gpu {
                     gpu_free_mb: gf2,
                     gpu_active: true,
                 });
-                let phashes = hash_fnv1a64_batch_tiled(&ctx, &pkeys, budget_mb, 64)?;
+                let phashes =
+                    hash_fnv1a64_batch_tiled(&ctx, &pkeys, budget_mb, 64, use_pinned_host)?;
                 for (k, &h) in phashes.iter().enumerate() {
                     let np = &outer_n[pidx[k]];
                     if let Some(cands) = index.get(&h) {
@@ -4351,17 +4758,13 @@ mod gpu {
         use_pinned_host: bool,
     ) -> Result<Vec<u64>> {
         if streams < 2 {
-            return hash_fnv1a64_batch_tiled(hctx, strings, budget_mb, reserve_mb);
+            return hash_fnv1a64_batch_tiled(hctx, strings, budget_mb, reserve_mb, use_pinned_host);
         }
         if strings.is_empty() {
             return Ok(Vec::new());
         }
-
-        if use_pinned_host {
-            log::info!(
-                "[GPU] gpu_use_pinned_host requested; current cudarc path uses pageable host memory (best-effort)"
-            );
-        }
+        let mut pinned_enabled = use_pinned_host;
+        let mut pinned_logged = false;
         // Build tile ranges greedily based on budget and free VRAM
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         let mut i = 0usize;
@@ -4399,6 +4802,10 @@ mod gpu {
         let mut flat: Vec<u8> = Vec::new();
         let mut offsets: Vec<i32> = Vec::new();
         let mut lengths: Vec<i32> = Vec::new();
+        // Optional pinned host staging buffers (exact-sized, reused when lengths match)
+        let mut pinned_flat: Option<cudarc::driver::PinnedHostSlice<u8>> = None;
+        let mut pinned_offsets: Option<cudarc::driver::PinnedHostSlice<i32>> = None;
+        let mut pinned_lengths: Option<cudarc::driver::PinnedHostSlice<i32>> = None;
 
         // Optional device output buffers reused across tiles (double-buffered)
         let mut pool_out_s0: Option<_> = None;
@@ -4434,20 +4841,87 @@ mod gpu {
 
             // Flatten current tile
             let tile = &strings[lo..hi];
-            offsets.clear();
-            lengths.clear();
-            flat.clear();
-            offsets.reserve(tile.len());
-            lengths.reserve(tile.len());
-            let mut cur = 0i32;
-            for s in tile {
-                offsets.push(cur);
-                let b = s.as_bytes();
-                lengths.push(b.len() as i32);
-                flat.extend_from_slice(b);
-                cur += b.len() as i32;
-            }
             let n = tile.len();
+            let mut use_pinned_tile = pinned_enabled;
+            let mut flat_len = 0usize;
+            if use_pinned_tile {
+                for s in tile {
+                    flat_len += s.len();
+                }
+                if flat_len == 0 {
+                    use_pinned_tile = false;
+                }
+            }
+            if use_pinned_tile {
+                let pinned_setup = (|| -> Result<()> {
+                    if pinned_flat.as_ref().map(|b| b.len()) != Some(flat_len) {
+                        pinned_flat =
+                            Some(unsafe { hctx.ctx.alloc_pinned::<u8>(flat_len) }?);
+                    }
+                    if pinned_offsets.as_ref().map(|b| b.len()) != Some(n) {
+                        pinned_offsets =
+                            Some(unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?);
+                    }
+                    if pinned_lengths.as_ref().map(|b| b.len()) != Some(n) {
+                        pinned_lengths =
+                            Some(unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?);
+                    }
+                    let flat_slice = pinned_flat
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("Pinned host buffer missing"))?
+                        .as_mut_slice()?;
+                    let offsets_slice = pinned_offsets
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("Pinned host offsets missing"))?
+                        .as_mut_slice()?;
+                    let lengths_slice = pinned_lengths
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("Pinned host lengths missing"))?
+                        .as_mut_slice()?;
+                    let mut cur = 0usize;
+                    for (idx, s) in tile.iter().enumerate() {
+                        offsets_slice[idx] = cur as i32;
+                        let b = s.as_bytes();
+                        lengths_slice[idx] = b.len() as i32;
+                        let end = cur + b.len();
+                        if end > flat_slice.len() {
+                            return Err(anyhow!("Pinned host buffer too small"));
+                        }
+                        flat_slice[cur..end].copy_from_slice(b);
+                        cur = end;
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = pinned_setup {
+                    log::warn!(
+                        "[GPU] Pinned host allocation failed ({}); falling back to pageable host memory",
+                        e
+                    );
+                    pinned_enabled = false;
+                    use_pinned_tile = false;
+                    pinned_flat = None;
+                    pinned_offsets = None;
+                    pinned_lengths = None;
+                } else if !pinned_logged {
+                    log::info!("[GPU] Using pinned host memory for hash staging buffers");
+                    pinned_logged = true;
+                }
+            }
+            if !use_pinned_tile {
+                offsets.clear();
+                lengths.clear();
+                flat.clear();
+                offsets.reserve(tile.len());
+                lengths.reserve(tile.len());
+                let mut cur = 0i32;
+                for s in tile {
+                    offsets.push(cur);
+                    let b = s.as_bytes();
+                    lengths.push(b.len() as i32);
+                    flat.extend_from_slice(b);
+                    cur += b.len() as i32;
+                }
+            }
 
             // Choose stream alternating
             let use_s1 = idx % 2 == 1;
@@ -4455,9 +4929,30 @@ mod gpu {
 
             // Allocate device buffers by copying to device and create output buffer; enqueue kernel
             let launched = (|| -> anyhow::Result<_> {
-                let d_buf = s.memcpy_stod(flat.as_slice())?;
-                let d_off = s.memcpy_stod(offsets.as_slice())?;
-                let d_len = s.memcpy_stod(lengths.as_slice())?;
+                let d_buf = if use_pinned_tile {
+                    let buf = pinned_flat
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("Pinned host buffer missing"))?;
+                    s.memcpy_stod(buf)?
+                } else {
+                    s.memcpy_stod(flat.as_slice())?
+                };
+                let d_off = if use_pinned_tile {
+                    let buf = pinned_offsets
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("Pinned host offsets missing"))?;
+                    s.memcpy_stod(buf)?
+                } else {
+                    s.memcpy_stod(offsets.as_slice())?
+                };
+                let d_len = if use_pinned_tile {
+                    let buf = pinned_lengths
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("Pinned host lengths missing"))?;
+                    s.memcpy_stod(buf)?
+                } else {
+                    s.memcpy_stod(lengths.as_slice())?
+                };
                 // Reuse or allocate output buffer on the selected stream
                 let mut d_out = if reuse_device_out {
                     if use_s1 {
@@ -4582,15 +5077,43 @@ mod gpu {
             return Ok(vec![]);
         }
 
-        // 2) Birthdate-only blocking to match CPU fallback and in-memory behavior
-        use std::collections::HashMap;
-        let mut block: HashMap<String, Vec<usize>> = HashMap::new();
+        // 2) Build the same blocking index used by the CPU-equivalent path so
+        // the GPU scorer operates on the exact same candidate set.
+        use chrono::Datelike;
+        use std::collections::{HashMap, HashSet};
+
+        #[derive(Hash, Eq, PartialEq)]
+        enum BKey {
+            Specific(u16, u8, u8, [u8; 4]), // (birth year, first init, last init, last soundex)
+            Year(u16),
+        }
+
+        let mut block: HashMap<BKey, Vec<usize>> = HashMap::new();
         for (j, p) in n2.iter().enumerate() {
-            if let Some(d) = p.birthdate {
-                for key in birthdate_keys(d, allow_swap) {
-                    block.entry(key).or_default().push(j);
-                }
-            }
+            let (Some(d), Some(fn_str), Some(ln_str)) = (
+                p.birthdate.as_ref(),
+                p.first_name.as_deref(),
+                p.last_name.as_deref(),
+            ) else {
+                continue;
+            };
+            let year = d.year() as u16;
+            let fi = fn_str
+                .bytes()
+                .find(|c| c.is_ascii_alphabetic())
+                .unwrap_or(b'?')
+                .to_ascii_uppercase();
+            let li = ln_str
+                .bytes()
+                .find(|c| c.is_ascii_alphabetic())
+                .unwrap_or(b'?')
+                .to_ascii_uppercase();
+            let sx = soundex4_ascii(ln_str);
+            block
+                .entry(BKey::Specific(year, fi, li, sx))
+                .or_default()
+                .push(j);
+            block.entry(BKey::Year(year)).or_default().push(j);
         }
 
         // 3) Prepare CUDA context & streams
@@ -4716,123 +5239,178 @@ mod gpu {
         // Cross-outer GPU batch (store pairs) to improve utilization by batching multiple outer records per launch
         let mut batch_pairs: Vec<(usize, usize)> = Vec::with_capacity(tile_max.max(1));
 
-        // Track seen pairs to deduplicate when swap generates multiple keys
-        use std::collections::HashSet;
+        // Track seen pairs to deduplicate when multiple lookup variants hit the same pair.
         let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
         let mut total_candidates = 0usize;
         let mut swap_candidates = 0usize;
 
         for (i, p1) in n1.iter().enumerate() {
-            // Birthdate-only blocking (matches CPU fallback and in-memory behavior)
-            // When allow_swap is true, look up by all birthdate keys (original + swapped)
-            if let Some(d) = p1.birthdate {
-                for key in birthdate_keys(d, allow_swap) {
-                    if let Some(cands_vec) = block.get(&key) {
-                        // Accumulate candidates for this outer record into cross-outer GPU batch
-                        for &j_idx in cands_vec {
-                            // Deduplicate: same pair can match via multiple keys when swap is enabled
-                            if !seen_pairs.insert((i, j_idx)) {
-                                continue;
+            let (Some(d), Some(fn_str), Some(ln_str)) = (
+                p1.birthdate.as_ref(),
+                p1.first_name.as_deref(),
+                p1.last_name.as_deref(),
+            ) else {
+                continue;
+            };
+            let year = d.year() as u16;
+            let fi = fn_str
+                .bytes()
+                .find(|c| c.is_ascii_alphabetic())
+                .unwrap_or(b'?')
+                .to_ascii_uppercase();
+            let li = ln_str
+                .bytes()
+                .find(|c| c.is_ascii_alphabetic())
+                .unwrap_or(b'?')
+                .to_ascii_uppercase();
+            let sx = soundex4_ascii(ln_str);
+
+            let mut seen_inner: HashSet<usize> = HashSet::new();
+            let mut cand_lists: Vec<&[usize]> = Vec::new();
+            if let Some(v) = block.get(&BKey::Specific(year, fi, li, sx)) {
+                cand_lists.push(v.as_slice());
+            }
+            if cand_lists.is_empty() {
+                if let Some(v) = block.get(&BKey::Specific(year, b'?', li, sx)) {
+                    cand_lists.push(v.as_slice());
+                }
+            }
+            if cand_lists.is_empty() {
+                let mut sx2 = sx;
+                sx2[2] = b'0';
+                sx2[3] = b'0';
+                if let Some(v) = block.get(&BKey::Specific(year, fi, li, sx2)) {
+                    cand_lists.push(v.as_slice());
+                }
+            }
+            if cand_lists.is_empty() {
+                if let Some(v) = block.get(&BKey::Year(year)) {
+                    cand_lists.push(v.as_slice());
+                }
+            }
+
+            for cands_vec in cand_lists {
+                for &j_idx in cands_vec {
+                    if !seen_inner.insert(j_idx) {
+                        continue;
+                    }
+                    if !seen_pairs.insert((i, j_idx)) {
+                        continue;
+                    }
+                    total_candidates += 1;
+                    if let (Some(d1), Some(d2)) = (p1.birthdate, n2[j_idx].birthdate) {
+                        if d1 != d2 {
+                            swap_candidates += 1;
+                        }
+                    }
+                    if !gpu_no_mid_mode()
+                        && (full_middle_len(&t1[i]) < 2 || full_middle_len(&t2[j_idx]) < 2)
+                    {
+                        continue;
+                    }
+                    let s1 = fuzzy_cache_name(&cache1[i]);
+                    let s2 = fuzzy_cache_name(&cache2[j_idx]);
+                    if s1.trim().is_empty() || s2.trim().is_empty() {
+                        continue;
+                    }
+                    if s1 == s2 {
+                        let bd_match =
+                            match (t1[i].birthdate, t2[j_idx].birthdate) {
+                                (Some(b1), Some(b2)) => {
+                                    let stored = b1.format("%Y-%m-%d").to_string();
+                                    let input = b2.format("%Y-%m-%d").to_string();
+                                    birthdate_matches(&stored, &input, allow_swap)
+                                }
+                                _ => false,
+                            };
+                        if bd_match {
+                            results.push(MatchPair {
+                                person1: t1[i].clone(),
+                                person2: t2[j_idx].clone(),
+                                confidence: 100.0,
+                                matched_fields: vec![
+                                    "fuzzy".into(),
+                                    "DIRECT MATCH".into(),
+                                    "birthdate".into(),
+                                ],
+                                is_matched_infnbd: false,
+                                is_matched_infnmnbd: false,
+                            });
+                        }
+                        continue;
+                    }
+                    batch_pairs.push((i, j_idx));
+                    if batch_pairs.len() >= tile_max {
+                        // Flush in chunks with OOM backoff using prefix drains
+                        let mut desired = tile_max.max(1);
+                        while batch_pairs.len() >= desired {
+                            let mut inner_acc =
+                                crate::matching::gpu::batch::GpuBatchAccumulator::new(desired);
+                            for &(oi, ij) in batch_pairs.iter().take(desired) {
+                                inner_acc.add_candidate(oi, ij);
                             }
-                            total_candidates += 1;
-                            // Check if this is a swap candidate (birthdates differ)
-                            if let (Some(d1), Some(d2)) = (p1.birthdate, n2[j_idx].birthdate) {
-                                if d1 != d2 {
-                                    swap_candidates += 1;
-                                    // Debug: log specific swap pairs
-                                    let s1 = d1.format("%Y-%m-%d").to_string();
-                                    let s2 = d2.format("%Y-%m-%d").to_string();
-                                    if s1 == "1990-09-05" && s2 == "1990-05-09" {
-                                        log::info!(
-                                            "[GPU_FUZZY] Swap pair generated: i={}, j={}, id1={}, id2={}, bd1={}, bd2={}",
-                                            i,
-                                            j_idx,
-                                            t1[i].id,
-                                            t2[j_idx].id,
-                                            s1,
-                                            s2
-                                        );
+                            let attempt = inner_acc.flush_to_gpu(
+                                &n1,
+                                &n2,
+                                &cache1,
+                                &cache2,
+                                t1,
+                                t2,
+                                ctx_arc,
+                                stream,
+                                stream2,
+                                &func,
+                                &func_jaro,
+                                &func_jw,
+                                &func_max3,
+                                desired,
+                                &mut results,
+                                allow_swap,
+                            );
+                            match attempt {
+                                Ok(()) => {
+                                    batch_pairs.drain(0..desired);
+                                    tile_count += 1;
+
+                                    // [GPU_OPT5] Refresh GPU memory info periodically (every 100ms or 10 tiles)
+                                    if last_mem_query.elapsed()
+                                        > std::time::Duration::from_millis(100)
+                                        || tile_count % 10 == 0
+                                    {
+                                        let (_tot_mb, free_mb) = cuda_mem_info_mb(&*ctx_arc);
+                                        cached_gpu_free_mb = free_mb;
+                                        last_mem_query = Instant::now();
+                                        mem_query_count += 1;
+                                    }
+
+                                    let mem = memory_stats_mb();
+                                    let frac = ((i + 1) as f32 / total as f32).clamp(0.0, 1.0);
+                                    on_progress(ProgressUpdate {
+                                        processed: i + 1,
+                                        total,
+                                        percent: frac * 100.0,
+                                        eta_secs: 0,
+                                        mem_used_mb: mem.used_mb,
+                                        mem_avail_mb: mem.avail_mb,
+                                        stage: "gpu_kernel",
+                                        batch_size_current: Some(desired as i64),
+                                        gpu_total_mb: gpu_total_mb,
+                                        gpu_free_mb: cached_gpu_free_mb,
+                                        gpu_active: true,
+                                    });
+                                    // continue while to check if more remains >= desired
+                                }
+                                Err(e) => {
+                                    if super::gpu_config::is_cuda_oom(&e) && desired > 512 {
+                                        desired = (desired / 2).max(512);
+                                        continue; // retry with smaller desired
+                                    } else {
+                                        return Err(anyhow!(e));
                                     }
                                 }
                             }
-                            batch_pairs.push((i, j_idx));
-                            if batch_pairs.len() >= tile_max {
-                                // Flush in chunks with OOM backoff using prefix drains
-                                let mut desired = tile_max.max(1);
-                                while batch_pairs.len() >= desired {
-                                    let mut inner_acc =
-                                        crate::matching::gpu::batch::GpuBatchAccumulator::new(
-                                            desired,
-                                        );
-                                    for &(oi, ij) in batch_pairs.iter().take(desired) {
-                                        inner_acc.add_candidate(oi, ij);
-                                    }
-                                    let attempt = inner_acc.flush_to_gpu(
-                                        &n1,
-                                        &n2,
-                                        &cache1,
-                                        &cache2,
-                                        t1,
-                                        t2,
-                                        ctx_arc,
-                                        stream,
-                                        stream2,
-                                        &func,
-                                        &func_jaro,
-                                        &func_jw,
-                                        &func_max3,
-                                        desired,
-                                        &mut results,
-                                        allow_swap,
-                                    );
-                                    match attempt {
-                                        Ok(()) => {
-                                            batch_pairs.drain(0..desired);
-                                            tile_count += 1;
-
-                                            // [GPU_OPT5] Refresh GPU memory info periodically (every 100ms or 10 tiles)
-                                            if last_mem_query.elapsed()
-                                                > std::time::Duration::from_millis(100)
-                                                || tile_count % 10 == 0
-                                            {
-                                                let (_tot_mb, free_mb) =
-                                                    cuda_mem_info_mb(&*ctx_arc);
-                                                cached_gpu_free_mb = free_mb;
-                                                last_mem_query = Instant::now();
-                                                mem_query_count += 1;
-                                            }
-
-                                            let mem = memory_stats_mb();
-                                            let frac =
-                                                ((i + 1) as f32 / total as f32).clamp(0.0, 1.0);
-                                            on_progress(ProgressUpdate {
-                                                processed: i + 1,
-                                                total,
-                                                percent: frac * 100.0,
-                                                eta_secs: 0,
-                                                mem_used_mb: mem.used_mb,
-                                                mem_avail_mb: mem.avail_mb,
-                                                stage: "gpu_kernel",
-                                                batch_size_current: Some(desired as i64),
-                                                gpu_total_mb: gpu_total_mb,
-                                                gpu_free_mb: cached_gpu_free_mb,
-                                                gpu_active: true,
-                                            });
-                                            // continue while to check if more remains >= desired
-                                        }
-                                        Err(e) => {
-                                            if super::gpu_config::is_cuda_oom(&e) && desired > 512 {
-                                                desired = (desired / 2).max(512);
-                                                continue; // retry with smaller desired
-                                            } else {
-                                                return Err(anyhow!(e));
-                                            }
-                                        }
-                                    }
-                                    if batch_pairs.len() < desired {
-                                        break;
-                                    }
-                                }
+                            if batch_pairs.len() < desired {
+                                break;
                             }
                         }
                     }
@@ -4921,18 +5499,6 @@ mod gpu {
             results.len()
         );
 
-        // Final CPU re-score for parity with CPU/in-memory paths (thresholding is done by callers)
-        for pair in &mut results {
-            let rescored = if gpu_no_mid_mode() {
-                compare_persons_no_mid(&pair.person1, &pair.person2)
-            } else {
-                compare_persons_new(&pair.person1, &pair.person2)
-            };
-            if let Some((cpu_score, _)) = rescored {
-                pair.confidence = cpu_score as f32;
-            }
-        }
-
         Ok(results)
     }
 
@@ -4971,6 +5537,8 @@ fn to_original<'a>(np: &NormalizedPerson, originals: &'a [Person]) -> Person {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "gpu")]
+    use crate::matching::gpu::match_fuzzy_gpu;
     use chrono::NaiveDate;
     use std::sync::{Arc, Mutex};
     fn p(id: i64, f: &str, m: Option<&str>, l: &str, d: (i32, u32, u32)) -> Person {
@@ -5772,6 +6340,9 @@ pub const DEFAULT_BATCH_SIZE: i64 = 50_000;
 
 #[derive(Clone, Debug)]
 pub struct StreamingConfig {
+    // Optional: cached table counts for the current run to avoid re-querying.
+    pub table1_count: Option<i64>,
+    pub table2_count: Option<i64>,
     pub batch_size: i64,
     pub memory_soft_min_mb: u64,
     // new fields for robustness on millions of records
@@ -5811,6 +6382,8 @@ pub struct StreamingConfig {
 impl Default for StreamingConfig {
     fn default() -> Self {
         Self {
+            table1_count: None,
+            table2_count: None,
             batch_size: 50_000,
             memory_soft_min_mb: 800,
             flush_every: 10_000,
@@ -5826,8 +6399,8 @@ impl Default for StreamingConfig {
             use_gpu_probe_hash: false,
             gpu_probe_batch_mb: 256,
             gpu_streams: 1,
-            gpu_use_pinned_host: false,
-            gpu_buffer_pool: true,
+            gpu_use_pinned_host: true,
+            gpu_buffer_pool: false,
             use_gpu_fuzzy_direct_hash: false,
             direct_use_fuzzy_normalization: false,
             use_gpu_fuzzy_metrics: false,
@@ -5946,6 +6519,41 @@ fn concat_key_for_np(algo: MatchingAlgorithm, p: &NormalizedPerson) -> Option<St
     }
 }
 
+#[derive(Clone)]
+struct IndexedPerson {
+    person: Person,
+    norm: NormalizedPerson,
+}
+
+fn prepare_probe_batch(
+    rows: &[Person],
+    algo: MatchingAlgorithm,
+    parallel_normalize: bool,
+) -> (Vec<NormalizedPerson>, Vec<String>, Vec<usize>) {
+    let mut probe_norms: Vec<NormalizedPerson> = Vec::with_capacity(rows.len());
+    let mut probe_keys: Vec<String> = Vec::new();
+    let mut probe_idx: Vec<usize> = Vec::new();
+    if parallel_normalize {
+        probe_norms = rows.par_iter().map(normalize_person).collect();
+        for (i, n) in probe_norms.iter().enumerate() {
+            if let Some(k) = concat_key_for_np(algo, n) {
+                probe_keys.push(k);
+                probe_idx.push(i);
+            }
+        }
+    } else {
+        for (i, p) in rows.iter().enumerate() {
+            let n = normalize_person(p);
+            if let Some(k) = concat_key_for_np(algo, &n) {
+                probe_keys.push(k);
+                probe_idx.push(i);
+            }
+            probe_norms.push(n);
+        }
+    }
+    (probe_norms, probe_keys, probe_idx)
+}
+
 /// GPU-accelerated (hash-join) streaming path for Algorithms 1 & 2.
 /// Falls back to CPU hashing if GPU is unavailable or feature is disabled.
 pub async fn stream_match_gpu_hash_join<F>(
@@ -5966,8 +6574,16 @@ where
         anyhow::bail!("GPU hash join applies only to Algorithms 1/2 (deterministic)");
     }
     // Decide inner/outer by row count
-    let c1 = get_person_count(pool, table1).await?;
-    let c2 = get_person_count(pool, table2).await?;
+    let c1 = if let Some(c) = cfg.table1_count {
+        c
+    } else {
+        get_person_count(pool, table1).await?
+    };
+    let c2 = if let Some(c) = cfg.table2_count {
+        c
+    } else {
+        get_person_count(pool, table2).await?
+    };
     // Try GPU hash computation context (optional)
     #[cfg(feature = "gpu")]
     let gpu_hash_ctx: Option<gpu::GpuHashContext> = if cfg.use_gpu_hash_join
@@ -6016,6 +6632,10 @@ where
 
     // Snapshot bounds + resume support
     let outer_watermark = get_max_id(pool, outer_table).await?;
+    let algo_label = format!("{:?}", algo);
+    let inner_table_string = inner_table.to_string();
+    let outer_table_string = outer_table.to_string();
+    let outer_filter_sig = format!("id<={}", outer_watermark);
     let mut offset: i64 = 0; // interpreted as last processed id in keyset mode
     if cfg.resume {
         if let Some(path) = cfg.checkpoint_path.as_ref() {
@@ -6031,7 +6651,8 @@ where
     }
 
     // Build inner hash index (CPU hash; can be replaced with GPU hash in future)
-    let mut index: std::collections::HashMap<u64, Vec<Person>> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<u64, Vec<IndexedPerson>> =
+        std::collections::HashMap::new();
     let mut inner_off: i64 = 0; // last id processed on inner side
     let mut inner_processed: usize = 0;
     let batch = cfg.batch_size.max(10_000);
@@ -6062,14 +6683,18 @@ where
             break;
         }
         // Prepare normalized key strings for hashing (only valid keys)
+        let mut indexed_rows: Vec<IndexedPerson> = Vec::with_capacity(rows.len());
+        for p in rows.iter() {
+            let n = normalize_person(p);
+            indexed_rows.push(IndexedPerson {
+                person: p.clone(),
+                norm: n,
+            });
+        }
         let mut key_strs: Vec<String> = Vec::new();
         let mut key_idx: Vec<usize> = Vec::new();
-        let mut norm_cache: Vec<Option<NormalizedPerson>> = Vec::with_capacity(rows.len());
-        for (i, p) in rows.iter().enumerate() {
-            let n = normalize_person(p);
-            let k = concat_key_for_np(algo, &n);
-            norm_cache.push(Some(n));
-            if let Some(s) = k {
+        for (i, item) in indexed_rows.iter().enumerate() {
+            if let Some(s) = concat_key_for_np(algo, &item.norm) {
                 key_idx.push(i);
                 key_strs.push(s);
             }
@@ -6114,7 +6739,13 @@ where
                                 cfg.gpu_use_pinned_host,
                             )
                         } else {
-                            self::gpu::hash_fnv1a64_batch_tiled(ctx, &key_strs, budget, 64)
+                            self::gpu::hash_fnv1a64_batch_tiled(
+                                ctx,
+                                &key_strs,
+                                budget,
+                                64,
+                                cfg.gpu_use_pinned_host,
+                            )
                         }
                     };
                     let res = crate::matching::gpu_config::with_oom_cpu_fallback(
@@ -6163,15 +6794,13 @@ where
         if let Some(hs) = hashed.as_ref() {
             for (j, &h) in hs.iter().enumerate() {
                 let i = key_idx[j];
-                index.entry(h).or_default().push(rows[i].clone());
+                index.entry(h).or_default().push(indexed_rows[i].clone());
             }
         } else {
             // CPU fallback hashing
-            for (i, p) in rows.iter().enumerate() {
-                if let Some(ref n) = norm_cache[i] {
-                    if let Some(h) = hash_key_for_np(algo, n) {
-                        index.entry(h).or_default().push(p.clone());
-                    }
+            for item in indexed_rows.iter() {
+                if let Some(h) = hash_key_for_np(algo, &item.norm) {
+                    index.entry(h).or_default().push(item.clone());
                 }
             }
         }
@@ -6185,6 +6814,9 @@ where
     let start = Instant::now();
     let mut written = 0usize;
     let mut _processed_rows: usize = 0;
+    let mut last_progress = 0usize;
+    let mut last_progress_at = Instant::now();
+    let progress_min_interval = Duration::from_millis(500);
     let mut next_rows_task: Option<tokio::task::JoinHandle<anyhow::Result<Vec<Person>>>> = None;
     loop {
         if let Some(c) = &ctrl {
@@ -6263,28 +6895,37 @@ where
         }
         _processed_rows += rows.len();
         // Progress update
-        let elapsed = start.elapsed();
         let processed = _processed_rows.min(total_outer as usize);
         let frac = (processed as f32 / total_outer as f32).clamp(0.0, 1.0);
         let eta_secs = if frac > 0.0 {
-            (elapsed.as_secs_f32() * (1.0 - frac) / frac) as u64
+            (start.elapsed().as_secs_f32() * (1.0 - frac) / frac) as u64
         } else {
             0
         };
-        let mem = memory_stats_mb();
-        on_progress(ProgressUpdate {
+        let progress_every = (batch as usize / 2).max(10_000);
+        if should_emit_progress(
             processed,
-            total: total_outer as usize,
-            percent: frac * 100.0,
-            eta_secs,
-            mem_used_mb: mem.used_mb,
-            mem_avail_mb: mem.avail_mb,
-            stage: "probing_hash",
-            batch_size_current: Some(batch),
-            gpu_total_mb: 0,
-            gpu_free_mb: 0,
-            gpu_active: false,
-        });
+            total_outer as usize,
+            &mut last_progress,
+            &mut last_progress_at,
+            progress_every,
+            progress_min_interval,
+        ) {
+            let mem = memory_stats_mb();
+            on_progress(ProgressUpdate {
+                processed,
+                total: total_outer as usize,
+                percent: frac * 100.0,
+                eta_secs,
+                mem_used_mb: mem.used_mb,
+                mem_avail_mb: mem.avail_mb,
+                stage: "probing_hash",
+                batch_size_current: Some(batch),
+                gpu_total_mb: 0,
+                gpu_free_mb: 0,
+                gpu_active: false,
+            });
+        }
 
         // Schedule prefetch of next rows (if enabled) while we process current batch
         if cfg.async_prefetch && _processed_rows < total_outer as usize {
@@ -6321,29 +6962,8 @@ where
         }
 
         // Prepare probe batch normalization and keys
-        let mut probe_norms: Vec<NormalizedPerson> = Vec::with_capacity(rows.len());
-        let mut probe_keys: Vec<String> = Vec::new();
-        let mut probe_idx: Vec<usize> = Vec::new();
-        if cfg.parallel_normalize {
-            probe_norms = rows.par_iter().map(normalize_person).collect();
-            for (i, n) in probe_norms.iter().enumerate() {
-                if let Some(k) = concat_key_for_np(algo, n) {
-                    probe_keys.push(k);
-                    probe_idx.push(i);
-                }
-            }
-        } else {
-            for (i, p) in rows.iter().enumerate() {
-                let n = normalize_person(p);
-                if concat_key_for_np(algo, &n).is_some() {
-                    if let Some(k) = concat_key_for_np(algo, &n) {
-                        probe_keys.push(k);
-                        probe_idx.push(i);
-                    }
-                }
-                probe_norms.push(n);
-            }
-        }
+        let (probe_norms, probe_keys, probe_idx) =
+            prepare_probe_batch(&rows, algo, cfg.parallel_normalize);
         // Compute probe hashes (GPU if enabled)
         let mut probe_hashes_opt: Option<Vec<u64>> = None;
         #[cfg(feature = "gpu")]
@@ -6392,6 +7012,7 @@ where
                                     &probe_keys,
                                     cfg.gpu_probe_batch_mb,
                                     64,
+                                    cfg.gpu_use_pinned_host,
                                 )
                             }
                         };
@@ -6443,11 +7064,12 @@ where
                 let p = &rows[i];
                 let n = &probe_norms[i];
                 if let Some(cands) = index.get(&h) {
-                    for q in cands {
-                        let n2 = normalize_person(q);
+                    for cand in cands {
+                        let q = &cand.person;
+                        let n2 = &cand.norm;
                         let ok = match algo {
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => matches_algo1(n, &n2),
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => matches_algo2(n, &n2),
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => matches_algo1(n, n2),
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => matches_algo2(n, n2),
                             MatchingAlgorithm::Fuzzy
                             | MatchingAlgorithm::FuzzyNoMiddle
                             | MatchingAlgorithm::HouseholdGpu
@@ -6456,9 +7078,9 @@ where
                         };
                         if ok {
                             let pair = if inner_table == table2 {
-                                to_pair(p, q, algo, n, &n2)
+                                to_pair(p, q, algo, n, n2)
                             } else {
-                                to_pair(q, p, algo, &n2, n)
+                                to_pair(q, p, algo, n2, n)
                             };
                             on_match(&pair)?;
                             written += 1;
@@ -6471,33 +7093,34 @@ where
             for (i, p) in rows.iter().enumerate() {
                 let n = &probe_norms[i];
                 if let Some(h) = hash_key_for_np(algo, n) {
-                    if let Some(cands) = index.get(&h) {
-                        for q in cands {
-                            let n2 = normalize_person(q);
-                            let ok = match algo {
-                                MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
-                                    matches_algo1(n, &n2)
-                                }
-                                MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
-                                    matches_algo2(n, &n2)
-                                }
-                                MatchingAlgorithm::Fuzzy
-                                | MatchingAlgorithm::FuzzyNoMiddle
-                                | MatchingAlgorithm::HouseholdGpu
-                                | MatchingAlgorithm::HouseholdGpuOpt6
-                                | MatchingAlgorithm::LevenshteinWeighted => false,
-                            };
-                            if ok {
-                                let pair = if inner_table == table2 {
-                                    to_pair(p, q, algo, n, &n2)
-                                } else {
-                                    to_pair(q, p, algo, &n2, n)
-                                };
-                                on_match(&pair)?;
-                                written += 1;
+                if let Some(cands) = index.get(&h) {
+                    for cand in cands {
+                        let q = &cand.person;
+                        let n2 = &cand.norm;
+                        let ok = match algo {
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
+                                matches_algo1(n, n2)
                             }
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
+                                matches_algo2(n, n2)
+                            }
+                            MatchingAlgorithm::Fuzzy
+                            | MatchingAlgorithm::FuzzyNoMiddle
+                            | MatchingAlgorithm::HouseholdGpu
+                            | MatchingAlgorithm::HouseholdGpuOpt6
+                            | MatchingAlgorithm::LevenshteinWeighted => false,
+                        };
+                        if ok {
+                            let pair = if inner_table == table2 {
+                                to_pair(p, q, algo, n, n2)
+                            } else {
+                                to_pair(q, p, algo, n2, n)
+                            };
+                            on_match(&pair)?;
+                            written += 1;
                         }
                     }
+                }
                 }
             }
         }
@@ -6506,9 +7129,9 @@ where
             if let Some(path) = cfg.checkpoint_path.as_ref() {
                 let cp = StreamCheckpoint {
                     db: String::new(),
-                    table_inner: inner_table.into(),
-                    table_outer: outer_table.into(),
-                    algorithm: format!("{:?}", algo),
+                    table_inner: inner_table_string.clone(),
+                    table_outer: outer_table_string.clone(),
+                    algorithm: algo_label.clone(),
                     batch_size: batch,
                     next_offset: offset,
                     total_outer,
@@ -6517,7 +7140,7 @@ where
                     updated_utc: chrono::Utc::now().to_rfc3339(),
                     last_id: Some(offset),
                     watermark_id: Some(outer_watermark),
-                    filter_sig: Some(format!("id<={}", outer_watermark)),
+                    filter_sig: Some(outer_filter_sig.clone()),
                 };
                 let _ = save_checkpoint(path, &cp);
             }
@@ -6553,14 +7176,25 @@ where
     }
 
     // Decide inner/outer by row counts across pools
-    let c1 = get_person_count(pool1, table1).await?;
-    let c2 = get_person_count(pool2, table2).await?;
+    let c1 = if let Some(c) = cfg.table1_count {
+        c
+    } else {
+        get_person_count(pool1, table1).await?
+    };
+    let c2 = if let Some(c) = cfg.table2_count {
+        c
+    } else {
+        get_person_count(pool2, table2).await?
+    };
     let inner_is_t2 = c2 <= c1;
     let inner_pool = if inner_is_t2 { pool2 } else { pool1 };
     let outer_pool = if inner_is_t2 { pool1 } else { pool2 };
     let inner_table = if inner_is_t2 { table2 } else { table1 };
     let outer_table = if inner_is_t2 { table1 } else { table2 };
     let total_outer = if inner_is_t2 { c1 } else { c2 };
+    let algo_label = format!("{:?}", algo);
+    let inner_table_string = inner_table.to_string();
+    let outer_table_string = outer_table.to_string();
 
     // Optional GPU hash context (for build/probe hashing)
     #[cfg(feature = "gpu")]
@@ -6594,6 +7228,7 @@ where
     // Snapshot and resume
     let inner_watermark = get_max_id(inner_pool, inner_table).await?;
     let outer_watermark = get_max_id(outer_pool, outer_table).await?;
+    let outer_filter_sig = format!("id<={}", outer_watermark);
     let mut offset: i64 = 0; // keyset last_id cursor for outer table
     let mut batch = cfg.batch_size.max(10_000);
     if cfg.resume {
@@ -6602,7 +7237,7 @@ where
                 if cp.db == ""
                     || (cp.table_inner == inner_table
                         && cp.table_outer == outer_table
-                        && cp.algorithm == format!("{:?}", algo))
+                        && cp.algorithm == algo_label)
                 {
                     offset = cp.last_id.unwrap_or(cp.next_offset).min(outer_watermark);
                     batch = cp.batch_size.max(10_000);
@@ -6612,7 +7247,8 @@ where
     }
 
     // Build inner hash index (CPU or GPU build hashing)
-    let mut index: std::collections::HashMap<u64, Vec<Person>> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<u64, Vec<IndexedPerson>> =
+        std::collections::HashMap::new();
     let mut inner_off: i64 = 0;
     let mut inner_processed: usize = 0;
     on_progress(ProgressUpdate {
@@ -6642,14 +7278,18 @@ where
             break;
         }
         // Prepare normalized key strings for hashing
+        let mut indexed_rows: Vec<IndexedPerson> = Vec::with_capacity(rows.len());
+        for p in rows.iter() {
+            let n = normalize_person(p);
+            indexed_rows.push(IndexedPerson {
+                person: p.clone(),
+                norm: n,
+            });
+        }
         let mut key_strs: Vec<String> = Vec::new();
         let mut key_idx: Vec<usize> = Vec::new();
-        let mut norm_cache: Vec<Option<NormalizedPerson>> = Vec::with_capacity(rows.len());
-        for (i, p) in rows.iter().enumerate() {
-            let n = normalize_person(p);
-            let k = concat_key_for_np(algo, &n);
-            norm_cache.push(Some(n));
-            if let Some(s) = k {
+        for (i, item) in indexed_rows.iter().enumerate() {
+            if let Some(s) = concat_key_for_np(algo, &item.norm) {
                 key_idx.push(i);
                 key_strs.push(s);
             }
@@ -6693,7 +7333,13 @@ where
                                     cfg.gpu_use_pinned_host,
                                 )
                             } else {
-                                self::gpu::hash_fnv1a64_batch_tiled(ctx, &key_strs, budget, 64)
+                                self::gpu::hash_fnv1a64_batch_tiled(
+                                    ctx,
+                                    &key_strs,
+                                    budget,
+                                    64,
+                                    cfg.gpu_use_pinned_host,
+                                )
                             }
                         };
                         match crate::matching::gpu_config::with_oom_cpu_fallback(
@@ -6742,14 +7388,12 @@ where
         if let Some(hs) = hashed.as_ref() {
             for (j, &h) in hs.iter().enumerate() {
                 let i = key_idx[j];
-                index.entry(h).or_default().push(rows[i].clone());
+                index.entry(h).or_default().push(indexed_rows[i].clone());
             }
         } else {
-            for (i, p) in rows.iter().enumerate() {
-                if let Some(ref n) = norm_cache[i] {
-                    if let Some(h) = hash_key_for_np(algo, n) {
-                        index.entry(h).or_default().push(p.clone());
-                    }
+            for item in indexed_rows.iter() {
+                if let Some(h) = hash_key_for_np(algo, &item.norm) {
+                    index.entry(h).or_default().push(item.clone());
                 }
             }
         }
@@ -6906,27 +7550,8 @@ where
         }
 
         // Prepare probe batch normalization and keys
-        let mut probe_norms: Vec<NormalizedPerson> = Vec::with_capacity(rows.len());
-        let mut probe_keys: Vec<String> = Vec::new();
-        let mut probe_idx: Vec<usize> = Vec::new();
-        if cfg.parallel_normalize {
-            probe_norms = rows.par_iter().map(normalize_person).collect();
-            for (i, n) in probe_norms.iter().enumerate() {
-                if let Some(k) = concat_key_for_np(algo, n) {
-                    probe_keys.push(k);
-                    probe_idx.push(i);
-                }
-            }
-        } else {
-            for (i, p) in rows.iter().enumerate() {
-                let n = normalize_person(p);
-                if let Some(k) = concat_key_for_np(algo, &n) {
-                    probe_keys.push(k);
-                    probe_idx.push(i);
-                }
-                probe_norms.push(n);
-            }
-        }
+        let (probe_norms, probe_keys, probe_idx) =
+            prepare_probe_batch(&rows, algo, cfg.parallel_normalize);
 
         // Compute probe hashes (GPU if enabled)
         let mut probe_hashes_opt: Option<Vec<u64>> = None;
@@ -6976,6 +7601,7 @@ where
                                     &probe_keys,
                                     cfg.gpu_probe_batch_mb,
                                     64,
+                                    cfg.gpu_use_pinned_host,
                                 )
                             }
                         };
@@ -7028,18 +7654,19 @@ where
                 let p = &rows[i];
                 let n = &probe_norms[i];
                 if let Some(cands) = index.get(&h) {
-                    for q in cands {
-                        let n2 = normalize_person(q);
+                    for cand in cands {
+                        let q = &cand.person;
+                        let n2 = &cand.norm;
                         let ok = match algo {
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => matches_algo1(n, &n2),
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => matches_algo2(n, &n2),
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => matches_algo1(n, n2),
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => matches_algo2(n, n2),
                             _ => false,
                         };
                         if ok {
                             let pair = if inner_is_t2 {
-                                to_pair(p, q, algo, n, &n2)
+                                to_pair(p, q, algo, n, n2)
                             } else {
-                                to_pair(q, p, algo, &n2, n)
+                                to_pair(q, p, algo, n2, n)
                             };
                             on_match(&pair)?;
                             written += 1;
@@ -7051,29 +7678,30 @@ where
             for (i, p) in rows.iter().enumerate() {
                 let n = &probe_norms[i];
                 if let Some(h) = hash_key_for_np(algo, n) {
-                    if let Some(cands) = index.get(&h) {
-                        for q in cands {
-                            let n2 = normalize_person(q);
-                            let ok = match algo {
-                                MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
-                                    matches_algo1(n, &n2)
-                                }
-                                MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
-                                    matches_algo2(n, &n2)
-                                }
-                                _ => false,
-                            };
-                            if ok {
-                                let pair = if inner_is_t2 {
-                                    to_pair(p, q, algo, n, &n2)
-                                } else {
-                                    to_pair(q, p, algo, &n2, n)
-                                };
-                                on_match(&pair)?;
-                                written += 1;
+                if let Some(cands) = index.get(&h) {
+                    for cand in cands {
+                        let q = &cand.person;
+                        let n2 = &cand.norm;
+                        let ok = match algo {
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
+                                matches_algo1(n, n2)
                             }
+                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
+                                matches_algo2(n, n2)
+                            }
+                            _ => false,
+                        };
+                        if ok {
+                            let pair = if inner_is_t2 {
+                                to_pair(p, q, algo, n, n2)
+                            } else {
+                                to_pair(q, p, algo, n2, n)
+                            };
+                            on_match(&pair)?;
+                            written += 1;
                         }
                     }
+                }
                 }
             }
         }
@@ -7083,9 +7711,9 @@ where
             if let Some(p) = cfg.checkpoint_path.as_ref() {
                 let cp = StreamCheckpoint {
                     db: String::new(),
-                    table_inner: inner_table.into(),
-                    table_outer: outer_table.into(),
-                    algorithm: format!("{:?}", algo),
+                    table_inner: inner_table_string.clone(),
+                    table_outer: outer_table_string.clone(),
+                    algorithm: algo_label.clone(),
                     batch_size: batch,
                     next_offset: offset,
                     total_outer,
@@ -7094,7 +7722,7 @@ where
                     updated_utc: chrono::Utc::now().to_rfc3339(),
                     last_id: Some(offset),
                     watermark_id: Some(outer_watermark),
-                    filter_sig: Some(format!("id<={}", outer_watermark)),
+                    filter_sig: Some(outer_filter_sig.clone()),
                 };
                 let _ = save_checkpoint(p, &cp);
             }
@@ -7172,6 +7800,9 @@ where
     } else {
         (table1, table2, c2)
     };
+    let algo_label = format!("{:?}", algo);
+    let inner_table_string = inner_table.to_string();
+    let outer_table_string = outer_table.to_string();
     let mut batch = cfg.batch_size.max(10_000);
     let start = Instant::now();
 
@@ -7214,7 +7845,7 @@ where
                 if cp.db == ""
                     || (cp.table_inner == inner_table
                         && cp.table_outer == outer_table
-                        && cp.algorithm == format!("{:?}", algo))
+                        && cp.algorithm == algo_label)
                 {
                     offset = cp.next_offset.min(total);
                     batch = cp.batch_size.max(10_000);
@@ -7226,6 +7857,9 @@ where
     let mut written = 0usize;
     let mut processed = 0usize;
     let mut last_chunk_start = Instant::now();
+    let mut last_progress = 0usize;
+    let mut last_progress_at = Instant::now();
+    let progress_min_interval = Duration::from_millis(500);
 
     let mut next_rows_task: Option<tokio::task::JoinHandle<anyhow::Result<Vec<Person>>>> = None;
 
@@ -7330,9 +7964,9 @@ where
                 p,
                 &StreamCheckpoint {
                     db: String::new(),
-                    table_inner: inner_table.to_string(),
-                    table_outer: outer_table.to_string(),
-                    algorithm: format!("{:?}", algo),
+                    table_inner: inner_table_string.clone(),
+                    table_outer: outer_table_string.clone(),
+                    algorithm: algo_label.clone(),
                     batch_size: batch,
                     next_offset: offset,
                     total_outer: total,
@@ -7353,20 +7987,30 @@ where
         } else {
             0
         };
-        let memx = memory_stats_mb();
-        on_progress(ProgressUpdate {
+        let progress_every = (batch as usize / 2).max(10_000);
+        if should_emit_progress(
             processed,
-            total: total as usize,
-            percent: frac * 100.0,
-            eta_secs: eta,
-            mem_used_mb: memx.used_mb,
-            mem_avail_mb: memx.avail_mb,
-            stage: "streaming",
-            batch_size_current: Some(batch),
-            gpu_total_mb: 0,
-            gpu_free_mb: 0,
-            gpu_active: false,
-        });
+            total as usize,
+            &mut last_progress,
+            &mut last_progress_at,
+            progress_every,
+            progress_min_interval,
+        ) {
+            let memx = memory_stats_mb();
+            on_progress(ProgressUpdate {
+                processed,
+                total: total as usize,
+                percent: frac * 100.0,
+                eta_secs: eta,
+                mem_used_mb: memx.used_mb,
+                mem_avail_mb: memx.avail_mb,
+                stage: "streaming",
+                batch_size_current: Some(batch),
+                gpu_total_mb: 0,
+                gpu_free_mb: 0,
+                gpu_active: false,
+            });
+        }
 
         // adaptive increase if fast
 
@@ -7399,6 +8043,7 @@ where
 
         let dur = last_chunk_start.elapsed();
         if dur.as_millis() > 0 {
+            let memx = memory_stats_mb();
             // if chunk was quick and memory is plentiful, increase
             if memx.avail_mb > cfg.memory_soft_min_mb * 2 && dur < std::time::Duration::from_secs(1)
             {
@@ -7527,9 +8172,15 @@ where
 
     let total_parts = parts1.len();
     let mut total_written = 0usize;
+    let algo_label = format!("{:?}", algo);
+    let table1_string = table1.to_string();
+    let table2_string = table2.to_string();
+    let progress_min_interval = Duration::from_millis(500);
     for pi in start_part..total_parts {
         let p1 = &parts1[pi];
         let p2 = &parts2[pi];
+        let mut last_progress = 0usize;
+        let mut last_progress_at = Instant::now();
         // Index inner table for this partition
         let c1 = get_person_count_where(pool, table1, &p1.where_sql, &p1.binds).await?;
         let c2 = get_person_count_where(pool, table2, &p2.where_sql, &p2.binds).await?;
@@ -7543,6 +8194,16 @@ where
             (table1, &p1.where_sql, &p1.binds, mapping1)
         } else {
             (table2, &p2.where_sql, &p2.binds, mapping2)
+        };
+        let inner_table_string = if inner_is_t2 {
+            table2_string.clone()
+        } else {
+            table1_string.clone()
+        };
+        let outer_table_string = if inner_is_t2 {
+            table1_string.clone()
+        } else {
+            table2_string.clone()
         };
         let total_outer = if inner_is_t2 { c1 } else { c2 };
         outer_watermark = get_max_id_where(pool, outer_table, outer_where, outer_binds).await?;
@@ -7924,9 +8585,9 @@ where
                     pth,
                     &StreamCheckpoint {
                         db: String::new(),
-                        table_inner: inner_table.to_string(),
-                        table_outer: outer_table.to_string(),
-                        algorithm: format!("{:?}", algo),
+                        table_inner: inner_table_string.clone(),
+                        table_outer: outer_table_string.clone(),
+                        algorithm: algo_label.clone(),
                         batch_size: batch,
                         next_offset: last_id,
                         total_outer,
@@ -7945,20 +8606,30 @@ where
             } else {
                 0
             };
-            let memx = memory_stats_mb();
-            on_progress(ProgressUpdate {
+            let progress_every = (batch as usize / 2).max(10_000);
+            if should_emit_progress(
                 processed,
-                total: total_outer as usize,
-                percent: frac * 100.0,
-                eta_secs: eta,
-                mem_used_mb: memx.used_mb,
-                mem_avail_mb: memx.avail_mb,
-                stage: if gpu_done { "gpu_kernel" } else { "streaming" },
-                batch_size_current: Some(batch),
-                gpu_total_mb: if gpu_done { 1 } else { 0 },
-                gpu_free_mb: 0,
-                gpu_active: gpu_done,
-            });
+                total_outer as usize,
+                &mut last_progress,
+                &mut last_progress_at,
+                progress_every,
+                progress_min_interval,
+            ) {
+                let memx = memory_stats_mb();
+                on_progress(ProgressUpdate {
+                    processed,
+                    total: total_outer as usize,
+                    percent: frac * 100.0,
+                    eta_secs: eta,
+                    mem_used_mb: memx.used_mb,
+                    mem_avail_mb: memx.avail_mb,
+                    stage: if gpu_done { "gpu_kernel" } else { "streaming" },
+                    batch_size_current: Some(batch),
+                    gpu_total_mb: if gpu_done { 1 } else { 0 },
+                    gpu_free_mb: 0,
+                    gpu_active: gpu_done,
+                });
+            }
             tokio::task::yield_now().await;
         }
     }
@@ -8103,8 +8774,16 @@ where
     // - L7-L9: 'city_code'
     // No external column mapping is required; records missing these fields simply won't join.
 
-    let c1 = get_person_count(pool, table1).await?;
-    let _c2 = get_person_count(pool, table2).await?;
+    let c1 = if let Some(c) = scfg.table1_count {
+        c
+    } else {
+        get_person_count(pool, table1).await?
+    };
+    let _c2 = if let Some(c) = scfg.table2_count {
+        c
+    } else {
+        get_person_count(pool, table2).await?
+    };
 
     // IMPORTANT: Always use table2 as inner (indexed) and table1 as outer (streamed)
     // to maintain parity with in-memory implementation and ensure consistent
@@ -8196,7 +8875,13 @@ where
             if !key_strs.is_empty() {
                 let (_gt, gf) = ctx.mem_info_mb();
                 let budget = (gf / 2).max(128);
-                if let Ok(hashes) = self::gpu::hash_fnv1a64_batch_tiled(&ctx, &key_strs, budget, 64)
+                if let Ok(hashes) = self::gpu::hash_fnv1a64_batch_tiled(
+                    &ctx,
+                    &key_strs,
+                    budget,
+                    64,
+                    scfg.gpu_use_pinned_host,
+                )
                 {
                     let mut map: std::collections::HashMap<u64, Vec<usize>> =
                         std::collections::HashMap::new();
@@ -8423,7 +9108,13 @@ where
                                 probe_keys.len(),
                                 budget
                             );
-                            match self::gpu::hash_fnv1a64_batch_tiled(&ctx, &probe_keys, budget, 64)
+                            match self::gpu::hash_fnv1a64_batch_tiled(
+                                &ctx,
+                                &probe_keys,
+                                budget,
+                                64,
+                                scfg.gpu_use_pinned_host,
+                            )
                             {
                                 Ok(v) => v,
                                 Err(_) => probe_keys
@@ -9184,8 +9875,16 @@ where
     // No external column mapping is required; records missing these fields simply won't join.
 
     // Counts: Table1 from pool1, Table2 from pool2
-    let c1 = get_person_count(pool1, table1).await?;
-    let _c2 = get_person_count(pool2, table2).await?;
+    let c1 = if let Some(c) = scfg.table1_count {
+        c
+    } else {
+        get_person_count(pool1, table1).await?
+    };
+    let _c2 = if let Some(c) = scfg.table2_count {
+        c
+    } else {
+        get_person_count(pool2, table2).await?
+    };
 
     // Always use table2 as inner (indexed) and table1 as outer (streamed)
     let (inner_table, outer_table, total_outer) = (table2, table1, c1);
@@ -9263,7 +9962,13 @@ where
             if !key_strs.is_empty() {
                 let (_gt, gf) = ctx.mem_info_mb();
                 let budget = (gf / 2).max(128);
-                if let Ok(hashes) = self::gpu::hash_fnv1a64_batch_tiled(&ctx, &key_strs, budget, 64)
+                if let Ok(hashes) = self::gpu::hash_fnv1a64_batch_tiled(
+                    &ctx,
+                    &key_strs,
+                    budget,
+                    64,
+                    scfg.gpu_use_pinned_host,
+                )
                 {
                     let mut map: std::collections::HashMap<u64, Vec<usize>> =
                         std::collections::HashMap::new();
@@ -9477,7 +10182,13 @@ where
                                 probe_keys.len(),
                                 budget
                             );
-                            match self::gpu::hash_fnv1a64_batch_tiled(&ctx, &probe_keys, budget, 64)
+                            match self::gpu::hash_fnv1a64_batch_tiled(
+                                &ctx,
+                                &probe_keys,
+                                budget,
+                                64,
+                                scfg.gpu_use_pinned_host,
+                            )
                             {
                                 Ok(v) => v,
                                 Err(_) => probe_keys
@@ -10118,7 +10829,11 @@ where
     let allow_birthdate_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
 
     // 1) Precompute totals per Table 2 household (denominator)
-    let c2_total = get_person_count(pool, table2).await?;
+    let c2_total = if let Some(c) = scfg.table2_count {
+        c
+    } else {
+        get_person_count(pool, table2).await?
+    };
     on_progress(ProgressUpdate {
         processed: 0,
         total: c2_total as usize,
@@ -10135,7 +10850,11 @@ where
     let totals_t2 = crate::db::schema::get_household_totals_map(pool, table2).await?;
 
     // 2) Load Table 1 into birthdate index (incremental, with progress)
-    let c1_total = get_person_count(pool, table1).await?;
+    let c1_total = if let Some(c) = scfg.table1_count {
+        c
+    } else {
+        get_person_count(pool, table1).await?
+    };
     let mut by_bd1: HashMap<String, Vec<Person>> = HashMap::new();
     let mut t1_loaded: i64 = 0;
     let load_batch: i64 = scfg.batch_size.max(10_000);
@@ -10570,7 +11289,11 @@ where
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     // 1) Precompute totals per Table 2 household (from pool2)
-    let c2_total = get_person_count(pool2, table2).await?;
+    let c2_total = if let Some(c) = scfg.table2_count {
+        c
+    } else {
+        get_person_count(pool2, table2).await?
+    };
     on_progress(ProgressUpdate {
         processed: 0,
         total: c2_total as usize,
@@ -10587,7 +11310,11 @@ where
     let totals_t2 = crate::db::schema::get_household_totals_map(pool2, table2).await?;
 
     // 2) Load Table 1 (from pool1) into birthdate index
-    let c1_total = get_person_count(pool1, table1).await?;
+    let c1_total = if let Some(c) = scfg.table1_count {
+        c
+    } else {
+        get_person_count(pool1, table1).await?
+    };
     let mut by_bd1: HashMap<String, Vec<Person>> = HashMap::new();
     let mut t1_loaded: i64 = 0;
     let load_batch: i64 = scfg.batch_size.max(10_000);
@@ -10989,7 +11716,11 @@ where
     let allow_birthdate_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
 
     // 1) Precompute totals per Table 1 UUID (denominator)
-    let c1_total = get_person_count(pool, table1).await?;
+    let c1_total = if let Some(c) = scfg.table1_count {
+        c
+    } else {
+        get_person_count(pool, table1).await?
+    };
     on_progress(ProgressUpdate {
         processed: 0,
         total: c1_total as usize,
@@ -11006,7 +11737,11 @@ where
     let totals_t1 = crate::db::schema::get_uuid_totals_map(pool, table1).await?;
 
     // 2) Load Table 2 into birthdate index (incremental)
-    let c2_total = get_person_count(pool, table2).await?;
+    let c2_total = if let Some(c) = scfg.table2_count {
+        c
+    } else {
+        get_person_count(pool, table2).await?
+    };
     let mut by_bd2: HashMap<chrono::NaiveDate, Vec<Person>> = HashMap::new();
     let mut t2_loaded: i64 = 0;
     let load_batch: i64 = scfg.batch_size.max(10_000);
@@ -11282,7 +12017,11 @@ where
     let allow_birthdate_swap = crate::matching::birthdate_matcher::allow_birthdate_swap();
 
     // 1) Precompute totals per Table 1 UUID (from pool1)
-    let c1_total = get_person_count(pool1, table1).await?;
+    let c1_total = if let Some(c) = scfg.table1_count {
+        c
+    } else {
+        get_person_count(pool1, table1).await?
+    };
     on_progress(ProgressUpdate {
         processed: 0,
         total: c1_total as usize,
@@ -11299,7 +12038,11 @@ where
     let totals_t1 = crate::db::schema::get_uuid_totals_map(pool1, table1).await?;
 
     // 2) Load Table 2 (from pool2) into birthdate index
-    let c2_total = get_person_count(pool2, table2).await?;
+    let c2_total = if let Some(c) = scfg.table2_count {
+        c
+    } else {
+        get_person_count(pool2, table2).await?
+    };
     let mut by_bd2: HashMap<chrono::NaiveDate, Vec<Person>> = HashMap::new();
     let mut t2_loaded: i64 = 0;
     let load_batch: i64 = scfg.batch_size.max(10_000);

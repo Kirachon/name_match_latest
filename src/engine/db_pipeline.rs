@@ -95,8 +95,16 @@ pub mod db_pipeline {
             .await;
         }
 
-        let c1 = get_person_count(pool, table1).await?;
-        let c2 = get_person_count(pool, table2).await?;
+        let c1 = if let Some(c) = cfg.table1_count {
+            c
+        } else {
+            get_person_count(pool, table1).await?
+        };
+        let c2 = if let Some(c) = cfg.table2_count {
+            c
+        } else {
+            get_person_count(pool, table2).await?
+        };
         let inner_is_t2 = c2 <= c1;
         let inner_table = if inner_is_t2 { table2 } else { table1 };
         let outer_table = if inner_is_t2 { table1 } else { table2 };
@@ -553,8 +561,16 @@ pub mod db_pipeline {
         use crate::normalize::normalize_person;
         use std::time::Instant;
 
-        let c1 = get_person_count(pool1, table1).await?;
-        let c2 = get_person_count(pool2, table2).await?;
+        let c1 = if let Some(c) = cfg.table1_count {
+            c
+        } else {
+            get_person_count(pool1, table1).await?
+        };
+        let c2 = if let Some(c) = cfg.table2_count {
+            c
+        } else {
+            get_person_count(pool2, table2).await?
+        };
         let inner_is_t2 = c2 <= c1;
         let inner_pool = if inner_is_t2 { pool2 } else { pool1 };
         let outer_pool = if inner_is_t2 { pool1 } else { pool2 };
@@ -1115,8 +1131,8 @@ pub mod db_pipeline {
             let key_algo = algo;
             let part = FnPartitioner::<crate::models::Person, _>(
                 move |p| {
+                    let n = normalize_person(p);
                     if last_initial {
-                        let n = normalize_person(p);
                         n.last_name
                             .as_deref()
                             .and_then(|s| s.chars().next())
@@ -1124,7 +1140,7 @@ pub mod db_pipeline {
                             .to_ascii_uppercase()
                             .to_string()
                     } else {
-                        crate::matching::key_for_engine(key_algo, &normalize_person(p))
+                        crate::matching::key_for_engine(key_algo, &n)
                             .unwrap_or_default()
                     }
                 },

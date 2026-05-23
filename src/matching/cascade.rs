@@ -574,10 +574,11 @@ where
         extra_field_names.len()
     );
 
-    // Track matched IDs for exclusive cascade mode
-    // We track by (table1_id, table2_id) pair to ensure uniqueness
-    let mut matched_pairs: HashSet<(i64, i64)> = HashSet::new();
     let use_exclusion = cfg.exclusion_mode == CascadeExclusionMode::Exclusive;
+    // In exclusive mode, keep shrinking working sets so we do not rebuild filtered clones
+    // from the full input tables on every level.
+    let mut remaining_t1: Vec<Person> = table1.to_vec();
+    let mut remaining_t2: Vec<Person> = table2.to_vec();
 
     log::info!("Starting cascade run for levels L1-L11 (L12 excluded)");
     log::info!("Exclusion mode: {:?}", cfg.exclusion_mode);
@@ -659,37 +660,17 @@ where
             allow_birthdate_swap: cfg.allow_birthdate_swap,
         };
 
-        // In exclusive mode, filter input tables to exclude already-matched records
-        let (filtered_t1, filtered_t2): (Vec<Person>, Vec<Person>) = if use_exclusion
-            && !matched_pairs.is_empty()
-        {
-            // Build sets of IDs that have already been matched
-            let matched_t1_ids: HashSet<i64> = matched_pairs.iter().map(|(id1, _)| *id1).collect();
-            let matched_t2_ids: HashSet<i64> = matched_pairs.iter().map(|(_, id2)| *id2).collect();
-
-            let t1_remaining: Vec<Person> = table1
-                .iter()
-                .filter(|p| !matched_t1_ids.contains(&p.id))
-                .cloned()
-                .collect();
-            let t2_remaining: Vec<Person> = table2
-                .iter()
-                .filter(|p| !matched_t2_ids.contains(&p.id))
-                .cloned()
-                .collect();
-
+        let (filtered_t1, filtered_t2): (&[Person], &[Person]) = if use_exclusion {
             log::info!(
                 "Exclusive mode: {} of {} records remain in T1, {} of {} in T2",
-                t1_remaining.len(),
+                remaining_t1.len(),
                 table1.len(),
-                t2_remaining.len(),
+                remaining_t2.len(),
                 table2.len()
             );
-
-            (t1_remaining, t2_remaining)
+            (&remaining_t1, &remaining_t2)
         } else {
-            // First level or independent mode: use full tables
-            (table1.to_vec(), table2.to_vec())
+            (table1, table2)
         };
 
         // Run matching on (potentially filtered) tables
@@ -699,25 +680,34 @@ where
             AdvLevel::L10FuzzyBirthdateFullMiddle | AdvLevel::L11FuzzyBirthdateNoMiddle
         ) {
             run_fuzzy_level(
-                &filtered_t1,
-                &filtered_t2,
+                filtered_t1,
+                filtered_t2,
                 &adv_cfg,
                 cfg.compute_backend,
                 cfg.gpu_device_id,
             )
         } else {
             // L1-L9: exact matching, always CPU
-            let mut m = advanced_match_inmemory(&filtered_t1, &filtered_t2, &adv_cfg);
+            let mut m = advanced_match_inmemory(filtered_t1, filtered_t2, &adv_cfg);
             sort_matches_by_id(&mut m);
             m
         };
         let match_count = matches.len();
         total_matches += match_count;
 
-        // In exclusive mode, track the newly matched pairs
+        // In exclusive mode, remove records matched at this level from the remaining pools.
         if use_exclusion {
+            let mut matched_t1_ids: HashSet<i64> = HashSet::new();
+            let mut matched_t2_ids: HashSet<i64> = HashSet::new();
             for m in &matches {
-                matched_pairs.insert((m.person1.id, m.person2.id));
+                matched_t1_ids.insert(m.person1.id);
+                matched_t2_ids.insert(m.person2.id);
+            }
+            if !matched_t1_ids.is_empty() {
+                remaining_t1.retain(|p| !matched_t1_ids.contains(&p.id));
+            }
+            if !matched_t2_ids.is_empty() {
+                remaining_t2.retain(|p| !matched_t2_ids.contains(&p.id));
             }
         }
 

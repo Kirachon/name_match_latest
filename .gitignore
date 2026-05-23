@@ -2,7 +2,27 @@
 
 # Local tooling artifacts (Codex/Context Engine)
 .augment-*
+.context-engine/
+.context-engine-*
+.context-engine-plans/
+.cargo/
+.cargo-temp/
+.cargo-home/
 .memories/
+
+# Local/generated run artifacts
+dist/
+output/
+tmp/
+matches.csv
+matches.csv.nmckpt
+matches_summary.txt
+summary_report_*.csv
+summary_report_*.xlsx
+repo_summary.json
+*.rar
+DOCUMENTATION.docx
+PRESENTATION.pptx
 
 # Editor/OS noise
 .DS_Store

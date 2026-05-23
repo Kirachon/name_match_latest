@@ -423,6 +423,8 @@ struct GuiApp {
 
     // Storage and system hints
     ssd_storage: bool,
+    // Experimental GPU-assisted matching toggle (checkbox-gated, default off)
+    experimental_gpu_assisted: bool,
 
     running: bool,
     progress: f32,
@@ -1144,6 +1146,7 @@ impl Default for GuiApp {
             gpu_build_active_now: false,
             gpu_probe_active_now: false,
             ssd_storage: false,
+            experimental_gpu_assisted: false,
             running: false,
             progress: 0.0,
             eta_secs: 0,
@@ -2231,6 +2234,8 @@ impl GuiApp {
                         self.fuzzy_gpu_mode = FuzzyGpuMode::Auto;
                         log::info!("[GUI] GPU enabled - auto-enabled all GPU features");
                     }
+                    ui.checkbox(&mut self.experimental_gpu_assisted, "Enable Experimental GPU-Assisted Matching")
+                        .on_hover_text("Opt-in experimental path that can use GPU-assisted prefiltering while keeping the stable matching logic untouched. Default off.");
                     // If GPU was just disabled, ensure dynamic tuner is stopped
                     if prev_use_gpu && !self.use_gpu {
                         #[cfg(feature = "gpu")]
@@ -2727,7 +2732,11 @@ impl GuiApp {
 
         let gpu_fuzzy_prep_mem_mb_val = self.gpu_fuzzy_prep_mem_mb.parse::<u64>().unwrap_or(256);
 
-        let use_gpu_fuzzy_direct_hash = self.use_gpu_fuzzy_direct_hash;
+        let use_gpu_fuzzy_direct_hash =
+            self.use_gpu_fuzzy_direct_hash || self.experimental_gpu_assisted;
+        let use_gpu_fuzzy_metrics = matches!(self.fuzzy_gpu_mode, FuzzyGpuMode::Force)
+            || (!self.experimental_gpu_assisted
+                && matches!(self.fuzzy_gpu_mode, FuzzyGpuMode::Auto));
         let use_gpu_levenshtein_full_scoring = self.use_gpu_levenshtein_full_scoring;
         let direct_norm_fuzzy = self.direct_norm_fuzzy;
 
@@ -2743,6 +2752,7 @@ impl GuiApp {
             .clamp(1, 16);
         let gpu_buffer_pool = self.gpu_buffer_pool;
         let gpu_pinned_host = self.gpu_pinned_host;
+        let experimental_gpu_assisted = self.experimental_gpu_assisted;
 
         // Advanced Matching selections
         let advanced_enabled = self.advanced_enabled;
@@ -2890,6 +2900,13 @@ impl GuiApp {
                 name_matcher::matching::set_gpu_fuzzy_direct_prep(use_gpu_fuzzy_direct_hash && (matches!(algo, MatchingAlgorithm::Fuzzy | MatchingAlgorithm::FuzzyNoMiddle | MatchingAlgorithm::LevenshteinWeighted) || (advanced_enabled && matches!(adv_level, Some(AdvLevel::L10FuzzyBirthdateFullMiddle) | Some(AdvLevel::L11FuzzyBirthdateNoMiddle)))));
                 name_matcher::matching::set_gpu_levenshtein_prepass(use_gpu_fuzzy_direct_hash && matches!(algo, MatchingAlgorithm::LevenshteinWeighted));
                 name_matcher::matching::set_gpu_levenshtein_full_scoring(use_gpu_levenshtein_full_scoring && matches!(algo, MatchingAlgorithm::LevenshteinWeighted));
+                scfg.use_gpu_fuzzy_metrics = use_gpu_fuzzy_metrics;
+                name_matcher::matching::set_gpu_fuzzy_metrics(scfg.use_gpu_fuzzy_metrics);
+                name_matcher::matching::set_gpu_fuzzy_force(matches!(
+                    fuzzy_gpu_mode,
+                    FuzzyGpuMode::Force
+                ));
+                name_matcher::matching::set_gpu_fuzzy_disable(!scfg.use_gpu_fuzzy_metrics && matches!(fuzzy_gpu_mode, FuzzyGpuMode::Off));
                 name_matcher::matching::set_gpu_fuzzy_prepass_budget_mb(gpu_fuzzy_prep_mem_mb_val);
 
                 // Log comprehensive GPU settings for verification
@@ -2919,15 +2936,24 @@ impl GuiApp {
                 log::info!("[GUI]   GPU Streams: {}", scfg.gpu_streams);
                 log::info!("[GUI]   GPU Buffer Pool: {}", scfg.gpu_buffer_pool);
                 log::info!("[GUI]   GPU Pinned Host: {}", scfg.gpu_use_pinned_host);
-                log::info!("[GUI]   GPU Fuzzy Direct Hash: {}", scfg.use_gpu_fuzzy_direct_hash);
-                log::info!("[GUI]   GPU Fuzzy Metrics: {}", scfg.use_gpu_fuzzy_metrics);
-                log::info!("[GUI]   Direct Use Fuzzy Normalization: {}", scfg.direct_use_fuzzy_normalization);
+                    log::info!("[GUI]   GPU Fuzzy Direct Hash: {}", scfg.use_gpu_fuzzy_direct_hash);
+                    log::info!("[GUI]   GPU Fuzzy Metrics: {}", scfg.use_gpu_fuzzy_metrics);
+                    log::info!("[GUI]   Direct Use Fuzzy Normalization: {}", scfg.direct_use_fuzzy_normalization);
+                    log::info!("[GUI]   Experimental GPU-Assisted Matching: {}", experimental_gpu_assisted);
 
-                // Apply Fuzzy GPU mode to both streaming and global toggles
-                scfg.use_gpu_fuzzy_metrics = matches!(fuzzy_gpu_mode, FuzzyGpuMode::Auto | FuzzyGpuMode::Force);
+                // Apply Fuzzy GPU mode to both streaming and global toggles.
+                // Experimental GPU-assisted matching enables the direct prefilter only;
+                // full GPU fuzzy metrics stay opt-in through Force mode.
+                scfg.use_gpu_fuzzy_metrics = scfg.use_gpu_fuzzy_metrics
+                    || matches!(fuzzy_gpu_mode, FuzzyGpuMode::Force);
                 name_matcher::matching::set_gpu_fuzzy_metrics(scfg.use_gpu_fuzzy_metrics);
-                name_matcher::matching::set_gpu_fuzzy_force(matches!(fuzzy_gpu_mode, FuzzyGpuMode::Force));
-                name_matcher::matching::set_gpu_fuzzy_disable(matches!(fuzzy_gpu_mode, FuzzyGpuMode::Off));
+                name_matcher::matching::set_gpu_fuzzy_force(matches!(
+                    fuzzy_gpu_mode,
+                    FuzzyGpuMode::Force
+                ));
+                name_matcher::matching::set_gpu_fuzzy_disable(
+                    matches!(fuzzy_gpu_mode, FuzzyGpuMode::Off) && !scfg.use_gpu_fuzzy_metrics,
+                );
 
                 scfg.checkpoint_path = Some(format!("{}.nmckpt", path));
                 // Pre-scan Table 2 extra field names for CSV/XLSX stream writers
@@ -3086,6 +3112,10 @@ impl GuiApp {
                                 let c2 = if let Some(pool2) = pool2_opt.as_ref() { get_person_count_fast(pool2, &table2).await.unwrap_or(0) } else { get_person_count_fast(&pool1, &table2).await.unwrap_or(0) };
                                 (c1, c2)
                             } else { (0, 0) };
+                            if use_streaming {
+                                scfg.table1_count = Some(c1);
+                                scfg.table2_count = Some(c2);
+                            }
                             if c1 > 0 || c2 > 0 {
                                 log::info!(
                                     "[GUI] L12 execution mode: {} (table1: {} rows, table2: {} rows)",
@@ -3270,6 +3300,11 @@ impl GuiApp {
                                 }
                             }
 
+                            let c1 = get_person_count(&pool1, &table1).await?;
+                            let c2 = if let Some(pool2) = pool2_opt.as_ref() { get_person_count(pool2, &table2).await? } else { get_person_count(&pool1, &table2).await? };
+                            scfg.table1_count = Some(c1);
+                            scfg.table2_count = Some(c2);
+
                             // SPECIAL CASE: Option 6 (HouseholdGpuOpt6) streaming routes to Advanced L12 household aggregator
                             if matches!(algo, MatchingAlgorithm::HouseholdGpuOpt6) {
                                 // Option 6 uses dedicated streaming path matching in-memory semantics exactly; no AdvConfig.
@@ -3421,6 +3456,11 @@ impl GuiApp {
                         let mut use_streaming = match mode { ModeSel::Streaming => true, ModeSel::InMemory => false, ModeSel::Auto => true };
                             if matches!(algo, MatchingAlgorithm::Fuzzy | MatchingAlgorithm::FuzzyNoMiddle | MatchingAlgorithm::HouseholdGpu | MatchingAlgorithm::HouseholdGpuOpt6 | MatchingAlgorithm::LevenshteinWeighted) { use_streaming = false; let _ = tx_for_async.send(Msg::Info("Selected algorithm uses in-memory mode (streaming disabled)".into())); }
                         if use_streaming {
+                            let c1 = get_person_count(&pool1, &table1).await?;
+                            let c2 = if let Some(pool2) = pool2_opt.as_ref() { get_person_count(pool2, &table2).await? } else { get_person_count(&pool1, &table2).await? };
+                            scfg.table1_count = Some(c1);
+                            scfg.table2_count = Some(c2);
+
                             let mut xw = XlsxStreamWriter::create_with_extra_fields(&path, extra_field_names.clone())?;
                             // using global run_start_utc captured earlier
                             use std::sync::{Arc};
@@ -3449,10 +3489,6 @@ impl GuiApp {
                                 let a2_used_c = a2_used.clone(); let total2_c = total2.clone(); let free2_c = free2.clone();
                                 let _ = stream_match_csv(&pool1, &table1, &table2, MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd, |p| { a2+=1; xw.append_algo2(p) }, scfg.clone(), move |u| { if u.gpu_active { a2_used_c.store(true, Ordering::Relaxed); } total2_c.store(u.gpu_total_mb as u64, Ordering::Relaxed); free2_c.store(u.gpu_free_mb as u64, Ordering::Relaxed); let _ = txp2.send(Msg::Progress(u)); }, ctrl.clone()).await?;
                             }
-                            // Fetch row counts for summary
-                            let c1 = get_person_count(&pool1, &table1).await?;
-                            let c2 = if let Some(pool2) = pool2_opt.as_ref() { get_person_count(pool2, &table2).await? } else { get_person_count(&pool1, &table2).await? };
-
                             let run_end_utc = chrono::Utc::now();
                             let duration_secs = (run_end_utc - run_start_utc).num_milliseconds() as f64 / 1000.0;
                             let a1_gpu = a1_used.load(Ordering::Relaxed);
@@ -3460,6 +3496,8 @@ impl GuiApp {
                             let gpu_used = a1_gpu || a2_gpu;
                             let gpu_total_mb = std::cmp::max(total1.load(Ordering::Relaxed), total2.load(Ordering::Relaxed));
                             let gpu_free_mb_end = if a2_gpu || total2.load(Ordering::Relaxed) > 0 { free2.load(Ordering::Relaxed) } else { free1.load(Ordering::Relaxed) };
+                            let c1 = scfg.table1_count.unwrap_or(0);
+                            let c2 = scfg.table2_count.unwrap_or(0);
 
                             xw.finalize(&SummaryContext {
                                 db_name: db_label.clone(), table1: table1.clone(), table2: table2.clone(), total_table1: c1 as usize, total_table2: c2 as usize,
@@ -3550,6 +3588,11 @@ impl GuiApp {
                         let mut csv_path = path.clone(); if !csv_path.to_ascii_lowercase().ends_with(".csv") { csv_path.push_str(".csv"); }
                         let mut csv_count = 0usize;
                         if use_streaming {
+                            let c1 = get_person_count(&pool1, &table1).await?;
+                            let c2 = if let Some(pool2) = pool2_opt.as_ref() { get_person_count(pool2, &table2).await? } else { get_person_count(&pool1, &table2).await? };
+                            scfg.table1_count = Some(c1);
+                            scfg.table2_count = Some(c2);
+
                             let mut w = CsvStreamWriter::create_with_extra_fields(&csv_path, algo, fuzzy_thr, extra_field_names.clone())?;
                             let flush_every = scfg.flush_every;
                             let txp3 = tx_for_async.clone();
@@ -3650,10 +3693,6 @@ impl GuiApp {
                                     let _ = txp5.send(Msg::Progress(u));
                                 }, ctrl.clone()).await?;
                             }
-                            // Fetch row counts for summary
-                            let c1 = get_person_count(&pool1, &table1).await?;
-                            let c2 = if let Some(pool2) = pool2_opt.as_ref() { get_person_count(pool2, &table2).await? } else { get_person_count(&pool1, &table2).await? };
-
                             // Compute summary timing and GPU fields
                             let run_end_utc = chrono::Utc::now();
                             let duration_secs = (run_end_utc - run_start_utc).num_milliseconds() as f64 / 1000.0;
@@ -3662,6 +3701,8 @@ impl GuiApp {
                             let gpu_used = a1_gpu || a2_gpu;
                             let gpu_total_mb = std::cmp::max(total1.load(Ordering::Relaxed), total2.load(Ordering::Relaxed));
                             let gpu_free_mb_end = if a2_gpu || total2.load(Ordering::Relaxed) > 0 { free2.load(Ordering::Relaxed) } else { free1.load(Ordering::Relaxed) };
+                            let c1 = scfg.table1_count.unwrap_or(0);
+                            let c2 = scfg.table2_count.unwrap_or(0);
 
                             xw.finalize(&SummaryContext {
                                 db_name: db_label.clone(), table1: table1.clone(), table2: table2.clone(), total_table1: c1 as usize, total_table2: c2 as usize,

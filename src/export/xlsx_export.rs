@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -7,19 +6,9 @@ use anyhow::Result;
 use chrono::{DateTime, FixedOffset, Utc};
 use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook, Worksheet};
 
-use crate::matching::MatchPair;
+use crate::export::{build_match_headers, collect_extra_field_names};
+use crate::matching::{MatchPair, MatchingAlgorithm};
 use crate::matching::advanced_matcher::AdvLevel;
-
-/// Collect all unique extra field names from person2 across all match pairs (sorted for consistency)
-fn collect_extra_field_names(results: &[MatchPair]) -> Vec<String> {
-    let mut field_set = BTreeSet::new();
-    for pair in results {
-        for key in pair.person2.extra_fields.keys() {
-            field_set.insert(key.clone());
-        }
-    }
-    field_set.into_iter().collect()
-}
 
 #[derive(Debug, Clone)]
 pub struct SummaryContext {
@@ -92,24 +81,10 @@ fn row_format_even() -> Format {
 
 /// Write only headers for algo1 sheet (for streaming)
 fn write_algo1_sheet_headers(ws: &mut Worksheet, extra_field_names: &[String]) -> Result<()> {
-    let mut headers: Vec<String> = vec![
-        "Table1_ID".to_string(),
-        "Table1_UUID".to_string(),
-        "Table1_FirstName".to_string(),
-        "Table1_LastName".to_string(),
-        "Table1_Birthdate".to_string(),
-        "Table2_ID".to_string(),
-        "Table2_UUID".to_string(),
-        "Table2_FirstName".to_string(),
-        "Table2_LastName".to_string(),
-        "Table2_Birthdate".to_string(),
-    ];
-    for field_name in extra_field_names {
-        headers.push(format!("Table2_{}", field_name));
-    }
-    headers.push("is_matched_Infnbd".to_string());
-    headers.push("Confidence".to_string());
-    headers.push("MatchedFields".to_string());
+    let headers = build_match_headers(
+        MatchingAlgorithm::IdUuidYasIsMatchedInfnbd,
+        extra_field_names,
+    );
 
     let hfmt = header_format();
     for (c, h) in headers.iter().enumerate() {
@@ -120,26 +95,10 @@ fn write_algo1_sheet_headers(ws: &mut Worksheet, extra_field_names: &[String]) -
 
 /// Write only headers for algo2 sheet (for streaming)
 fn write_algo2_sheet_headers(ws: &mut Worksheet, extra_field_names: &[String]) -> Result<()> {
-    let mut headers: Vec<String> = vec![
-        "Table1_ID".to_string(),
-        "Table1_UUID".to_string(),
-        "Table1_FirstName".to_string(),
-        "Table1_MiddleName".to_string(),
-        "Table1_LastName".to_string(),
-        "Table1_Birthdate".to_string(),
-        "Table2_ID".to_string(),
-        "Table2_UUID".to_string(),
-        "Table2_FirstName".to_string(),
-        "Table2_MiddleName".to_string(),
-        "Table2_LastName".to_string(),
-        "Table2_Birthdate".to_string(),
-    ];
-    for field_name in extra_field_names {
-        headers.push(format!("Table2_{}", field_name));
-    }
-    headers.push("is_matched_Infnmnbd".to_string());
-    headers.push("Confidence".to_string());
-    headers.push("MatchedFields".to_string());
+    let headers = build_match_headers(
+        MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd,
+        extra_field_names,
+    );
 
     let hfmt = header_format();
     for (c, h) in headers.iter().enumerate() {
@@ -150,29 +109,10 @@ fn write_algo2_sheet_headers(ws: &mut Worksheet, extra_field_names: &[String]) -
 
 fn write_algo1_sheet(ws: &mut Worksheet, matches: &[MatchPair]) -> Result<()> {
     let extra_field_names = collect_extra_field_names(matches);
-
-    let mut headers: Vec<String> = vec![
-        "Table1_ID".to_string(),
-        "Table1_UUID".to_string(),
-        "Table1_FirstName".to_string(),
-        "Table1_LastName".to_string(),
-        "Table1_Birthdate".to_string(),
-        "Table2_ID".to_string(),
-        "Table2_UUID".to_string(),
-        "Table2_FirstName".to_string(),
-        "Table2_LastName".to_string(),
-        "Table2_Birthdate".to_string(),
-    ];
-
-    // Add extra Table2 field headers
-    for field_name in &extra_field_names {
-        headers.push(format!("Table2_{}", field_name));
-    }
-
-    // Add final columns
-    headers.push("is_matched_Infnbd".to_string());
-    headers.push("Confidence".to_string());
-    headers.push("MatchedFields".to_string());
+    let headers = build_match_headers(
+        MatchingAlgorithm::IdUuidYasIsMatchedInfnbd,
+        &extra_field_names,
+    );
 
     let hfmt = header_format();
     for (c, h) in headers.iter().enumerate() {
@@ -248,31 +188,10 @@ fn write_algo1_sheet(ws: &mut Worksheet, matches: &[MatchPair]) -> Result<()> {
 
 fn write_algo2_sheet(ws: &mut Worksheet, matches: &[MatchPair]) -> Result<()> {
     let extra_field_names = collect_extra_field_names(matches);
-
-    let mut headers: Vec<String> = vec![
-        "Table1_ID".to_string(),
-        "Table1_UUID".to_string(),
-        "Table1_FirstName".to_string(),
-        "Table1_MiddleName".to_string(),
-        "Table1_LastName".to_string(),
-        "Table1_Birthdate".to_string(),
-        "Table2_ID".to_string(),
-        "Table2_UUID".to_string(),
-        "Table2_FirstName".to_string(),
-        "Table2_MiddleName".to_string(),
-        "Table2_LastName".to_string(),
-        "Table2_Birthdate".to_string(),
-    ];
-
-    // Add extra Table2 field headers
-    for field_name in &extra_field_names {
-        headers.push(format!("Table2_{}", field_name));
-    }
-
-    // Add final columns
-    headers.push("is_matched_Infnmnbd".to_string());
-    headers.push("Confidence".to_string());
-    headers.push("MatchedFields".to_string());
+    let headers = build_match_headers(
+        MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd,
+        &extra_field_names,
+    );
 
     let hfmt = header_format();
     for (c, h) in headers.iter().enumerate() {

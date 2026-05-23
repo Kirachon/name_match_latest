@@ -39,6 +39,10 @@ pub struct CliFlags {
     pub cascade_missing_columns: MissingColumnMode,
     /// Specific levels to run in cascade (comma-separated, e.g., "1,2,3,10,11")
     pub cascade_levels: Vec<u8>,
+
+    // Experimental flags
+    /// Enable experimental GPU-assisted matching prefilter path
+    pub experimental_gpu_assisted: bool,
 }
 
 impl CliFlags {
@@ -62,6 +66,9 @@ impl CliFlags {
         let gpu_lev_full_flag = args.iter().any(|a| a == "--gpu-levenshtein-full-scoring");
         let use_gpu_flag = args.iter().any(|a| a == "--use-gpu");
         let auto_optimize_flag = args.iter().any(|a| a == "--auto-optimize");
+        let experimental_gpu_assisted_flag = args
+            .iter()
+            .any(|a| a == "--experimental-gpu-assisted-matching");
 
         // Advanced matching flags
         let adv_level_num: Option<u8> = args
@@ -129,6 +136,7 @@ impl CliFlags {
             cascade: cascade_flag,
             cascade_missing_columns,
             cascade_levels,
+            experimental_gpu_assisted: experimental_gpu_assisted_flag,
         }
     }
 
@@ -161,6 +169,9 @@ impl CliFlags {
         }
         if parse_bool_env("NAME_MATCHER_STREAMING") {
             self.streaming = true;
+        }
+        if parse_bool_env("NAME_MATCHER_EXPERIMENTAL_GPU_ASSISTED_MATCHING") {
+            self.experimental_gpu_assisted = true;
         }
 
         // GPU streams from env

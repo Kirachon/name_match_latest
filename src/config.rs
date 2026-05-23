@@ -77,6 +77,8 @@ impl Default for GpuConfig {
 pub struct MatchingConfig {
     pub algorithm: Option<u8>,         // 1,2,3,4 (and HouseholdGpu via GUI)
     pub min_score_export: Option<f32>, // e.g., 95.0 for fuzzy
+    #[serde(default)]
+    pub experimental_gpu_assisted: bool,
 }
 
 impl Default for MatchingConfig {
@@ -84,6 +86,7 @@ impl Default for MatchingConfig {
         Self {
             algorithm: None,
             min_score_export: None,
+            experimental_gpu_assisted: false,
         }
     }
 }

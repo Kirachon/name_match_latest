@@ -66,7 +66,7 @@ Enable GPU usage:
 - `NAME_MATCHER_USE_GPU=1`
 
 Throughput knobs supported by the app:
-- `NAME_MATCHER_GPU_STREAMS=2` (try `3` if stable and VRAM allows)
+- `NAME_MATCHER_GPU_STREAMS=1` (set `2` to enable overlap; try `3` if stable and VRAM allows)
 - `NAME_MATCHER_GPU_BUFFER_POOL=1` (reuses buffers; usually improves throughput)
 - `NAME_MATCHER_GPU_PINNED_HOST=1` (can help transfer overlap; uses pinned memory)
 
@@ -79,7 +79,7 @@ Feature toggles (enable only what you need):
 
 On Windows, long-running GPU kernels can trigger TDR (driver timeout). If you see random GPU resets:
 - Prefer `NAME_MATCHER_STREAMING=1`
-- Keep `NAME_MATCHER_GPU_STREAMS` modest (`2` first)
+- Keep `NAME_MATCHER_GPU_STREAMS` modest (`1` first; `2` only if stable)
 - Only adjust TDR registry settings if this is a dedicated compute machine and you understand the tradeoffs
 
 ## 5) Remote MySQL: the biggest “hidden” bottleneck

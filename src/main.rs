@@ -187,17 +187,19 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         );
         eprintln!("  NAME_MATCHER_DIRECT_FUZZY_NORMALIZATION=1 to enable the above");
         eprintln!(
-            "  --gpu-streams <N>                Number of CUDA streams for overlap (default 1)"
+            "  --gpu-streams <N>                Number of CUDA streams for overlap (default 1; set 2+ to enable overlap)"
         );
         eprintln!("  NAME_MATCHER_GPU_STREAMS=<N>     set via environment");
         eprintln!(
-            "  --gpu-buffer-pool | --no-gpu-buffer-pool   Reuse device buffers within a run (default on)"
+            "  --gpu-buffer-pool | --no-gpu-buffer-pool   Reuse device buffers within a run (default off)"
         );
         eprintln!("  NAME_MATCHER_GPU_BUFFER_POOL=0/1 configure via environment");
         eprintln!(
-            "  --gpu-pinned-host                Use pinned host memory for transfers when available"
+            "  --gpu-pinned-host                Use pinned host memory for transfers when available (default on)"
         );
         eprintln!("  NAME_MATCHER_GPU_PINNED_HOST=1   enable via environment (best-effort)");
+        eprintln!("  NAME_MATCHER_GPU_BATCH_LOG=0     disable per-batch GPU logging (default on)");
+        eprintln!("  NAME_MATCHER_GPU_FUZZY_READBACK=1 enable GPU fuzzy score readback (default off)");
         eprintln!(
             "  --gpu-fuzzy-metrics              Use GPU kernels for Levenshtein/Jaro/Jaro-Winkler scoring (Algo 3/4)"
         );
@@ -333,6 +335,23 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         if let Some(fmt) = &cfg.export.format {
             format = fmt.to_ascii_lowercase();
         }
+    }
+    let experimental_gpu_assisted_flag = args
+        .iter()
+        .any(|a| a == "--experimental-gpu-assisted-matching");
+    let experimental_gpu_assisted_env =
+        std::env::var("NAME_MATCHER_EXPERIMENTAL_GPU_ASSISTED_MATCHING")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let experimental_gpu_assisted = app_cfg_opt
+        .as_ref()
+        .map(|cfg| cfg.matching.experimental_gpu_assisted)
+        .unwrap_or(false)
+        || experimental_gpu_assisted_flag
+        || experimental_gpu_assisted_env;
+    if experimental_gpu_assisted {
+        info!("Experimental GPU-assisted matching is enabled (checkbox-gated)");
     }
 
     let algorithm = match algo_num {
@@ -768,6 +787,8 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
                 let mut scfg_l12 = StreamingConfig {
                     ..Default::default()
                 };
+                scfg_l12.table1_count = Some(c1);
+                scfg_l12.table2_count = Some(c2);
                 scfg_l12.use_gpu_fuzzy_metrics =
                     auto_optimize || gpu_fuzzy_metrics_env || gpu_fuzzy_metrics_flag;
                 let gpu_used_l12 = scfg_l12.use_gpu_fuzzy_metrics; // Capture before move
@@ -1021,6 +1042,8 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         let mut scfg = StreamingConfig {
             ..Default::default()
         };
+        scfg.table1_count = Some(c1);
+        scfg.table2_count = Some(c2);
         // Enable GPU for Advanced matching based on level type and CLI flags
         match level {
             // L1-L9: Exact matching - use GPU hash join
@@ -1266,6 +1289,8 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
 
         info!("Streaming mode enabled ({} + {} rows).", c1, c2);
         let mut s_cfg = StreamingConfig::default();
+        s_cfg.table1_count = Some(c1);
+        s_cfg.table2_count = Some(c2);
         s_cfg.checkpoint_path = Some(format!("{}.nmckpt", out_path));
         // Apply global GPU fuzzy overrides (heuristic force/disable)
         {
@@ -1303,6 +1328,9 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
                         s_cfg.parallel_normalize = opt.parallel_normalize;
                         s_cfg.gpu_probe_batch_mb = opt.gpu_probe_batch_mb;
                         s_cfg.enable_dynamic_gpu_tuning = opt.enable_dynamic_gpu_tuning;
+                        s_cfg.gpu_streams = opt.gpu_streams;
+                        s_cfg.gpu_buffer_pool = opt.gpu_buffer_pool;
+                        s_cfg.gpu_use_pinned_host = opt.gpu_use_pinned_host;
                         // GPU features per algorithm
                         s_cfg.use_gpu_hash_join = opt.use_gpu_hash_join;
                         s_cfg.use_gpu_build_hash = opt.use_gpu_hash_join;
@@ -1318,6 +1346,8 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
                     }
                 }
             }
+
+            crate::matching::set_dynamic_gpu_tuning(s_cfg.enable_dynamic_gpu_tuning);
 
             let gpu_fuzzy_force_env = std::env::var("NAME_MATCHER_GPU_FUZZY_FORCE")
                 .ok()
@@ -1367,7 +1397,6 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         if gpu_fuzzy_metrics_flag {
             s_cfg.use_gpu_fuzzy_metrics = true;
         }
-
         // SPECIAL CASE: Streaming path for original Option 5/6 (Household aggregation)
         // The generic streaming join emits person-pair rows and does not handle household aggregation.
         // To maintain parity with the in-memory Option 5/6 implementation and avoid zero-results,
@@ -2243,7 +2272,9 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        crate::matching::set_gpu_fuzzy_direct_prep(gpu_fuzzy_direct_env || gpu_fuzzy_direct_flag);
+        crate::matching::set_gpu_fuzzy_direct_prep(
+            experimental_gpu_assisted || gpu_fuzzy_direct_env || gpu_fuzzy_direct_flag,
+        );
         // Apply GPU fuzzy metrics toggle in in-memory mode as well
         let gpu_fuzzy_metrics_env = std::env::var("NAME_MATCHER_GPU_FUZZY_METRICS")
             .ok()

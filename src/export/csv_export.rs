@@ -1,9 +1,9 @@
+use crate::export::{build_match_headers, collect_extra_field_names};
 use crate::export::xlsx_export::SummaryContext;
 use crate::matching::advanced_matcher::AdvLevel;
 use crate::matching::{MatchPair, MatchingAlgorithm};
 use anyhow::Result;
 use csv::{Writer, WriterBuilder};
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::BufWriter;
 
@@ -33,97 +33,12 @@ pub fn export_to_csv(
     Ok(())
 }
 
-/// Collect all unique extra field names from person2 across all match pairs (sorted for consistency)
-fn collect_extra_field_names(results: &[MatchPair]) -> Vec<String> {
-    let mut field_set = BTreeSet::new();
-    for pair in results {
-        for key in pair.person2.extra_fields.keys() {
-            field_set.insert(key.clone());
-        }
-    }
-    field_set.into_iter().collect()
-}
-
 fn write_headers<W: std::io::Write>(
     w: &mut Writer<W>,
     algorithm: MatchingAlgorithm,
     extra_field_names: &[String],
 ) -> Result<()> {
-    let mut headers: Vec<String> = match algorithm {
-        MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => vec![
-            "Table1_ID".to_string(),
-            "Table1_UUID".to_string(),
-            "Table1_FirstName".to_string(),
-            "Table1_LastName".to_string(),
-            "Table1_Birthdate".to_string(),
-            "Table2_ID".to_string(),
-            "Table2_UUID".to_string(),
-            "Table2_FirstName".to_string(),
-            "Table2_LastName".to_string(),
-            "Table2_Birthdate".to_string(),
-        ],
-        MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => vec![
-            "Table1_ID".to_string(),
-            "Table1_UUID".to_string(),
-            "Table1_FirstName".to_string(),
-            "Table1_MiddleName".to_string(),
-            "Table1_LastName".to_string(),
-            "Table1_Birthdate".to_string(),
-            "Table2_ID".to_string(),
-            "Table2_UUID".to_string(),
-            "Table2_FirstName".to_string(),
-            "Table2_MiddleName".to_string(),
-            "Table2_LastName".to_string(),
-            "Table2_Birthdate".to_string(),
-        ],
-        MatchingAlgorithm::Fuzzy
-        | MatchingAlgorithm::FuzzyNoMiddle
-        | MatchingAlgorithm::HouseholdGpu
-        | MatchingAlgorithm::HouseholdGpuOpt6
-        | MatchingAlgorithm::LevenshteinWeighted => vec![
-            "Table1_ID".to_string(),
-            "Table1_UUID".to_string(),
-            "Table1_FirstName".to_string(),
-            "Table1_MiddleName".to_string(),
-            "Table1_LastName".to_string(),
-            "Table1_Birthdate".to_string(),
-            "Table2_ID".to_string(),
-            "Table2_UUID".to_string(),
-            "Table2_FirstName".to_string(),
-            "Table2_MiddleName".to_string(),
-            "Table2_LastName".to_string(),
-            "Table2_Birthdate".to_string(),
-        ],
-    };
-
-    // Add extra Table2 field headers
-    for field_name in extra_field_names {
-        headers.push(format!("Table2_{}", field_name));
-    }
-
-    // Add final columns
-    match algorithm {
-        MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
-            headers.push("is_matched_Infnbd".to_string());
-            headers.push("Confidence".to_string());
-            headers.push("MatchedFields".to_string());
-        }
-        MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
-            headers.push("is_matched_Infnmnbd".to_string());
-            headers.push("Confidence".to_string());
-            headers.push("MatchedFields".to_string());
-        }
-        MatchingAlgorithm::Fuzzy
-        | MatchingAlgorithm::FuzzyNoMiddle
-        | MatchingAlgorithm::LevenshteinWeighted
-        | MatchingAlgorithm::HouseholdGpu
-        | MatchingAlgorithm::HouseholdGpuOpt6 => {
-            headers.push("is_matched_Fuzzy".to_string());
-            headers.push("Confidence".to_string());
-            headers.push("MatchedFields".to_string());
-        }
-    }
-
+    let headers = build_match_headers(algorithm, extra_field_names);
     w.write_record(&headers)?;
     Ok(())
 }

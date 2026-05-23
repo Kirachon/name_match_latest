@@ -92,6 +92,12 @@ pub struct Cli {
         default_value_t = 0.95
     )]
     pub advanced_threshold: f32,
+    /// Enable experimental GPU-assisted candidate prefilter path
+    #[arg(
+        long = "experimental-gpu-assisted-matching",
+        env = "NAME_MATCHER_EXPERIMENTAL_GPU_ASSISTED_MATCHING"
+    )]
+    pub experimental_gpu_assisted_matching: bool,
 }
 
 impl Cli {
@@ -121,6 +127,7 @@ impl Cli {
             matching: MatchingConfig {
                 algorithm: Some(self.algo),
                 min_score_export: None,
+                experimental_gpu_assisted: self.experimental_gpu_assisted_matching,
             },
             export: ExportConfig {
                 out_path: Some(self.out_path.clone()),

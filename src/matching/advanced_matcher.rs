@@ -2,6 +2,7 @@ use crate::matching::MatchPair;
 use crate::matching::birthdate_matcher::{birthdate_keys, match_level_10, match_level_11};
 use crate::models::Person;
 use crate::normalize::{normalize_person, normalize_text};
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvLevel {
@@ -189,6 +190,49 @@ fn make_pair(
     }
 }
 
+fn exact_matched_fields(level: AdvLevel) -> Vec<String> {
+    let mut fields = vec!["first_name".to_string(), "last_name".to_string()];
+    match level {
+        AdvLevel::L1BirthdateFullMiddle => {
+            fields.insert(1, "middle_name".into());
+            fields.push("birthdate".into());
+        }
+        AdvLevel::L2BirthdateMiddleInitial => {
+            fields.insert(1, "middle_initial".into());
+            fields.push("birthdate".into());
+        }
+        AdvLevel::L3BirthdateNoMiddle => {
+            fields.push("birthdate".into());
+        }
+        AdvLevel::L4BarangayFullMiddle => {
+            fields.insert(1, "middle_name".into());
+            fields.push("barangay_code".into());
+        }
+        AdvLevel::L5BarangayMiddleInitial => {
+            fields.insert(1, "middle_initial".into());
+            fields.push("barangay_code".into());
+        }
+        AdvLevel::L6BarangayNoMiddle => {
+            fields.push("barangay_code".into());
+        }
+        AdvLevel::L7CityFullMiddle => {
+            fields.insert(1, "middle_name".into());
+            fields.push("city_code".into());
+        }
+        AdvLevel::L8CityMiddleInitial => {
+            fields.insert(1, "middle_initial".into());
+            fields.push("city_code".into());
+        }
+        AdvLevel::L9CityNoMiddle => {
+            fields.push("city_code".into());
+        }
+        AdvLevel::L10FuzzyBirthdateFullMiddle
+        | AdvLevel::L11FuzzyBirthdateNoMiddle
+        | AdvLevel::L12HouseholdMatching => {}
+    }
+    fields
+}
+
 /// In-memory Advanced Matching (exact levels + L10 fuzzy with birthdate)
 pub fn advanced_match_inmemory(
     table1: &[Person],
@@ -220,209 +264,227 @@ pub fn advanced_match_inmemory(
         AdvLevel::L10FuzzyBirthdateFullMiddle => {
             use std::collections::{HashMap, HashSet};
             let allow_swap = cfg.allow_birthdate_swap;
+            let cache1: Vec<super::CpuFuzzyCache> =
+                table1.par_iter().map(super::build_cpu_fuzzy_cache).collect();
+            let cache2: Vec<super::CpuFuzzyCache> =
+                table2.par_iter().map(super::build_cpu_fuzzy_cache).collect();
 
             // Index table2 by birthdate (with optional swapped keys)
-            let mut by_bd2: HashMap<String, Vec<&Person>> = HashMap::new();
-            for p in table2 {
+            let mut by_bd2: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, p) in table2.iter().enumerate() {
                 if let Some(bd) = p.birthdate {
                     for key in birthdate_keys(bd, allow_swap) {
-                        by_bd2.entry(key).or_default().push(p);
+                        by_bd2.entry(key).or_default().push(idx);
                     }
                 }
             }
 
-            let mut out = Vec::new();
-            for a in table1 {
-                let Some(bd_a) = a.birthdate else {
-                    continue;
-                };
-                let stored = bd_a.format("%Y-%m-%d").to_string();
-                let mut seen_inner: HashSet<i64> = HashSet::new();
-                for key in birthdate_keys(bd_a, allow_swap) {
-                    if let Some(v2) = by_bd2.get(&key) {
-                        for &b in v2 {
-                            if !seen_inner.insert(b.id) {
-                                continue;
-                            }
-                            let Some(bd_b) = b.birthdate else {
-                                continue;
-                            };
-                            let input = bd_b.format("%Y-%m-%d").to_string();
-                            if !match_level_10(&stored, &input, allow_swap) {
-                                continue;
-                            }
+            let matched_fields = vec![
+                "fuzzy".into(),
+                "first_name".into(),
+                "middle_name".into(),
+                "last_name".into(),
+                "birthdate".into(),
+            ];
 
-                            if let Some((score, _label)) = super::fuzzy_compare_names_new(
-                                a.first_name.as_deref(),
-                                a.middle_name.as_deref(),
-                                a.last_name.as_deref(),
-                                b.first_name.as_deref(),
-                                b.middle_name.as_deref(),
-                                b.last_name.as_deref(),
-                            ) {
-                                let mut pair = MatchPair {
-                                    person1: a.clone(),
-                                    person2: b.clone(),
-                                    confidence: score as f32, // 0-100
-                                    matched_fields: vec![
-                                        "fuzzy".into(),
-                                        "first_name".into(),
-                                        "middle_name".into(),
-                                        "last_name".into(),
-                                        "birthdate".into(),
-                                    ],
-                                    is_matched_infnbd: false,
-                                    is_matched_infnmnbd: false,
+            let mut by_outer: Vec<(usize, Vec<MatchPair>)> = table1
+                .par_iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let mut row_out = Vec::new();
+                    let Some(bd_a) = a.birthdate else {
+                        return (i, row_out);
+                    };
+                    let stored = bd_a.format("%Y-%m-%d").to_string();
+                    let mut seen_inner: HashSet<i64> = HashSet::new();
+
+                    for key in birthdate_keys(bd_a, allow_swap) {
+                        if let Some(v2) = by_bd2.get(&key) {
+                            for &j in v2 {
+                                let b = &table2[j];
+                                if !seen_inner.insert(b.id) {
+                                    continue;
+                                }
+                                let Some(bd_b) = b.birthdate else {
+                                    continue;
                                 };
-                                // Full middle name required (len >= 2 after trimming '.')
-                                let m1 = pair.person1.middle_name.as_deref().unwrap_or("").trim();
-                                let m2 = pair.person2.middle_name.as_deref().unwrap_or("").trim();
-                                let l1 = m1
-                                    .trim_matches('.')
-                                    .chars()
-                                    .filter(|c| !c.is_whitespace())
-                                    .count();
-                                let l2 = m2
-                                    .trim_matches('.')
-                                    .chars()
-                                    .filter(|c| !c.is_whitespace())
-                                    .count();
-                                if l1 < 2 || l2 < 2 {
+                                let input = bd_b.format("%Y-%m-%d").to_string();
+                                if !match_level_10(&stored, &input, allow_swap) {
                                     continue;
                                 }
-                                if (pair.confidence / 100.0) < cfg.threshold {
-                                    continue;
+
+                                if let Some((score, _label)) =
+                                    super::classify_cached_full(&cache1[i], &cache2[j])
+                                {
+                                    let pair = MatchPair {
+                                        person1: a.clone(),
+                                        person2: b.clone(),
+                                        confidence: score as f32, // 0-100
+                                        matched_fields: matched_fields.clone(),
+                                        is_matched_infnbd: false,
+                                        is_matched_infnmnbd: false,
+                                    };
+                                    let m1 = pair.person1.middle_name.as_deref().unwrap_or("").trim();
+                                    let m2 = pair.person2.middle_name.as_deref().unwrap_or("").trim();
+                                    let l1 = m1
+                                        .trim_matches('.')
+                                        .chars()
+                                        .filter(|c| !c.is_whitespace())
+                                        .count();
+                                    let l2 = m2
+                                        .trim_matches('.')
+                                        .chars()
+                                        .filter(|c| !c.is_whitespace())
+                                        .count();
+                                    if l1 < 2 || l2 < 2 {
+                                        continue;
+                                    }
+                                    if (pair.confidence / 100.0) < cfg.threshold {
+                                        continue;
+                                    }
+                                    row_out.push(pair);
                                 }
-                                out.push(pair);
                             }
                         }
                     }
-                }
-            }
-            out
+                    (i, row_out)
+                })
+                .collect();
+            by_outer.sort_unstable_by_key(|(idx, _)| *idx);
+
+            by_outer
+                .into_iter()
+                .flat_map(|(_, row_matches)| row_matches)
+                .collect()
         }
         AdvLevel::L11FuzzyBirthdateNoMiddle => {
             use std::collections::{HashMap, HashSet};
-            let allow_swap = cfg.allow_birthdate_swap;
+            let allow_swap = false;
+            let cache1: Vec<super::CpuFuzzyCache> =
+                table1.par_iter().map(super::build_cpu_fuzzy_cache).collect();
+            let cache2: Vec<super::CpuFuzzyCache> =
+                table2.par_iter().map(super::build_cpu_fuzzy_cache).collect();
 
-            let mut by_bd2: HashMap<String, Vec<&Person>> = HashMap::new();
-            for p in table2 {
+            let mut by_bd2: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, p) in table2.iter().enumerate() {
                 if let Some(bd) = p.birthdate {
                     for key in birthdate_keys(bd, allow_swap) {
-                        by_bd2.entry(key).or_default().push(p);
+                        by_bd2.entry(key).or_default().push(idx);
                     }
                 }
             }
 
-            let mut out = Vec::new();
-            for a in table1 {
-                let Some(bd_a) = a.birthdate else {
-                    continue;
-                };
-                let stored = bd_a.format("%Y-%m-%d").to_string();
-                let mut seen_inner: HashSet<i64> = HashSet::new();
-                for key in birthdate_keys(bd_a, allow_swap) {
-                    if let Some(v2) = by_bd2.get(&key) {
-                        for &b in v2 {
-                            if !seen_inner.insert(b.id) {
-                                continue;
-                            }
-                            let Some(bd_b) = b.birthdate else {
-                                continue;
-                            };
-                            let input = bd_b.format("%Y-%m-%d").to_string();
-                            if !match_level_11(&stored, &input, allow_swap) {
-                                continue;
-                            }
-                            if let Some((score, _label)) = super::fuzzy_compare_names_no_mid(
-                                a.first_name.as_deref(),
-                                a.last_name.as_deref(),
-                                b.first_name.as_deref(),
-                                b.last_name.as_deref(),
-                            ) {
-                                let pair = MatchPair {
-                                    person1: a.clone(),
-                                    person2: b.clone(),
-                                    confidence: score as f32, // 0-100
-                                    matched_fields: vec![
-                                        "fuzzy".into(),
-                                        "first_name".into(),
-                                        "last_name".into(),
-                                        "birthdate".into(),
-                                    ],
-                                    is_matched_infnbd: false,
-                                    is_matched_infnmnbd: false,
-                                };
-                                if (pair.confidence / 100.0) < cfg.threshold {
+            let matched_fields = vec![
+                "fuzzy".into(),
+                "first_name".into(),
+                "last_name".into(),
+                "birthdate".into(),
+            ];
+
+            let mut by_outer: Vec<(usize, Vec<MatchPair>)> = table1
+                .par_iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let mut row_out = Vec::new();
+                    let Some(bd_a) = a.birthdate else {
+                        return (i, row_out);
+                    };
+                    let stored = bd_a.format("%Y-%m-%d").to_string();
+                    let mut seen_inner: HashSet<i64> = HashSet::new();
+
+                    for key in birthdate_keys(bd_a, allow_swap) {
+                        if let Some(v2) = by_bd2.get(&key) {
+                            for &j in v2 {
+                                let b = &table2[j];
+                                if !seen_inner.insert(b.id) {
                                     continue;
                                 }
-                                out.push(pair);
+                                let Some(bd_b) = b.birthdate else {
+                                    continue;
+                                };
+                                let input = bd_b.format("%Y-%m-%d").to_string();
+                                if !match_level_11(&stored, &input, allow_swap) {
+                                    continue;
+                                }
+                                if let Some((score, _label)) =
+                                    super::classify_cached_no_mid(&cache1[i], &cache2[j])
+                                {
+                                    let pair = MatchPair {
+                                        person1: a.clone(),
+                                        person2: b.clone(),
+                                        confidence: score as f32, // 0-100
+                                        matched_fields: matched_fields.clone(),
+                                        is_matched_infnbd: false,
+                                        is_matched_infnmnbd: false,
+                                    };
+                                    if (pair.confidence / 100.0) < cfg.threshold {
+                                        continue;
+                                    }
+                                    row_out.push(pair);
+                                }
                             }
                         }
                     }
-                }
-            }
-            out
+                    (i, row_out)
+                })
+                .collect();
+            by_outer.sort_unstable_by_key(|(idx, _)| *idx);
+
+            by_outer
+                .into_iter()
+                .flat_map(|(_, row_matches)| row_matches)
+                .collect()
         }
         _ => {
             // Exact levels via key map
-            let mut map2: HashMap<String, Vec<&Person>> = HashMap::new();
-            for p in table2 {
-                if let Some(k) = exact_key(p, cfg.level, &cfg.cols) {
-                    map2.entry(k).or_default().push(p);
-                }
+            let mut table2_keys: Vec<(usize, String)> = table2
+                .par_iter()
+                .enumerate()
+                .filter_map(|(idx, p)| exact_key(p, cfg.level, &cfg.cols).map(|k| (idx, k)))
+                .collect();
+            table2_keys.sort_unstable_by_key(|(idx, _)| *idx);
+
+            let mut map2: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, k) in table2_keys {
+                map2.entry(k).or_default().push(idx);
             }
-            let mut out = Vec::new();
-            for p1 in table1 {
-                if let Some(k) = exact_key(p1, cfg.level, &cfg.cols) {
-                    if let Some(cands) = map2.get(&k) {
-                        for p2 in cands {
-                            let mut fields =
-                                vec!["first_name".to_string(), "last_name".to_string()];
-                            match cfg.level {
-                                AdvLevel::L1BirthdateFullMiddle => {
-                                    fields.insert(1, "middle_name".into());
-                                    fields.push("birthdate".into());
-                                }
-                                AdvLevel::L2BirthdateMiddleInitial => {
-                                    fields.insert(1, "middle_initial".into());
-                                    fields.push("birthdate".into());
-                                }
-                                AdvLevel::L3BirthdateNoMiddle => {
-                                    fields.push("birthdate".into());
-                                }
-                                AdvLevel::L4BarangayFullMiddle => {
-                                    fields.insert(1, "middle_name".into());
-                                    fields.push("barangay_code".into());
-                                }
-                                AdvLevel::L5BarangayMiddleInitial => {
-                                    fields.insert(1, "middle_initial".into());
-                                    fields.push("barangay_code".into());
-                                }
-                                AdvLevel::L6BarangayNoMiddle => {
-                                    fields.push("barangay_code".into());
-                                }
-                                AdvLevel::L7CityFullMiddle => {
-                                    fields.insert(1, "middle_name".into());
-                                    fields.push("city_code".into());
-                                }
-                                AdvLevel::L8CityMiddleInitial => {
-                                    fields.insert(1, "middle_initial".into());
-                                    fields.push("city_code".into());
-                                }
-                                AdvLevel::L9CityNoMiddle => {
-                                    fields.push("city_code".into());
-                                }
-                                AdvLevel::L10FuzzyBirthdateFullMiddle
-                                | AdvLevel::L11FuzzyBirthdateNoMiddle
-                                | AdvLevel::L12HouseholdMatching => {}
-                            }
-                            out.push(make_pair(p1, p2, 1.0, fields));
-                        }
-                    }
-                }
-            }
-            out
+
+            let mut table1_keys: Vec<(usize, String)> = table1
+                .par_iter()
+                .enumerate()
+                .filter_map(|(idx, p)| exact_key(p, cfg.level, &cfg.cols).map(|k| (idx, k)))
+                .collect();
+            table1_keys.sort_unstable_by_key(|(idx, _)| *idx);
+
+            let fields = exact_matched_fields(cfg.level);
+            let mut by_outer: Vec<(usize, Vec<MatchPair>)> = table1_keys
+                .par_iter()
+                .map(|(idx1, k)| {
+                    let row_matches = map2
+                        .get(k)
+                        .map(|cands| {
+                            cands
+                                .iter()
+                                .map(|&idx2| {
+                                    make_pair(
+                                        &table1[*idx1],
+                                        &table2[idx2],
+                                        1.0,
+                                        fields.clone(),
+                                    )
+                                })
+                                .collect::<Vec<MatchPair>>()
+                        })
+                        .unwrap_or_default();
+                    (*idx1, row_matches)
+                })
+                .collect();
+            by_outer.sort_unstable_by_key(|(idx, _)| *idx);
+
+            by_outer
+                .into_iter()
+                .flat_map(|(_, row_matches)| row_matches)
+                .collect()
         }
     }
 }
@@ -544,7 +606,8 @@ pub fn advanced_match_inmemory_gpu(
         return advanced_match_inmemory(table1, table2, cfg);
     }
 
-    // Construct GPU match options
+    // Construct GPU match options. L11 intentionally ignores swapped
+    // birthdates to match the CPU L11 implementation.
     let opts = MatchOptions {
         backend: ComputeBackend::Gpu,
         gpu: Some(GpuConfig {
@@ -578,10 +641,12 @@ pub fn advanced_match_inmemory_gpu(
         }
         AdvLevel::L11FuzzyBirthdateNoMiddle => crate::matching::gpu_config::with_oom_cpu_fallback(
             || {
+                let mut l11_opts = opts.clone();
+                l11_opts.allow_birthdate_swap = false;
                 crate::matching::cascade_match_fuzzy_no_mid_gpu(
                     table1,
                     table2,
-                    opts.clone(),
+                    l11_opts,
                     on_progress,
                 )
             },
@@ -733,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_birthdate_swap_allowed_l11() {
+    fn fuzzy_birthdate_swap_ignored_l11() {
         unsafe {
             std::env::set_var("NAME_MATCHER_ALLOW_BIRTHDATE_SWAP", "1");
         }
@@ -746,7 +811,7 @@ mod tests {
             allow_birthdate_swap: true,
         };
         let r = advanced_match_inmemory(&a, &b, &cfg);
-        assert_eq!(r.len(), 1);
+        assert_eq!(r.len(), 0);
         unsafe {
             std::env::set_var("NAME_MATCHER_ALLOW_BIRTHDATE_SWAP", "0");
         }
