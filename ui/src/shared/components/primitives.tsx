@@ -6,8 +6,7 @@ import { cx } from "@/shared/lib/format";
 export type ButtonTone = "primary" | "secondary" | "ghost" | "danger";
 export type ButtonSize = "sm" | "md";
 
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   tone?: ButtonTone;
   size?: ButtonSize;
   loading?: boolean;
@@ -147,7 +146,9 @@ export function SectionHeader({
   className,
 }: SectionHeaderProps) {
   return (
-    <div className={cx("flex items-start justify-between gap-3 mb-3", className)}>
+    <div
+      className={cx("flex items-start justify-between gap-3 mb-3", className)}
+    >
       <div>
         <h2 className="section-title">{title}</h2>
         {description && (

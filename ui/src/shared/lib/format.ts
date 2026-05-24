@@ -3,7 +3,9 @@ export const cx = clsx;
 
 export function formatNumber(n: number | null | undefined): string {
   if (n == null || Number.isNaN(n)) return "—";
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(n);
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(
+    n,
+  );
 }
 
 export function formatBytes(mb: number): string {

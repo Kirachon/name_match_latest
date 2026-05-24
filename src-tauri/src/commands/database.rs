@@ -38,6 +38,19 @@ pub async fn connect_db(
 }
 
 #[tauri::command]
+pub async fn validate_db_credentials(creds: DbCredentialsDto) -> AppResult<u64> {
+    let started = Instant::now();
+    let pool = AppState::build_pool(&creds).await?;
+    let ping = sqlx::query("SELECT 1")
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| AppError::Database(format!("ping failed: {e}")));
+    pool.close().await;
+    ping?;
+    Ok(started.elapsed().as_millis() as u64)
+}
+
+#[tauri::command]
 pub async fn test_connection(
     session_id: String,
     state: State<'_, Arc<AppState>>,

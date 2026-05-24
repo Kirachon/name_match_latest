@@ -176,6 +176,15 @@ The connection is per-side. Both source **and** target must be connected
 before the Configure tab unlocks. Check the Status Rail at the top — both
 status dots should be green.
 
+### Window opens off-screen or at an awkward size
+
+The Tauri shell persists window geometry through `tauri-plugin-window-state`.
+To reset the saved position and size, close the app and delete:
+
+```powershell
+Remove-Item "$env:APPDATA\io.namematcher.desktop\window-state.json"
+```
+
 ### Cancellation is slow
 
 Cancellation is cooperative. The engine checks the cancellation flag at DB

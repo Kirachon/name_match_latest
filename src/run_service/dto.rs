@@ -527,6 +527,9 @@ pub struct ResultPageRequestDto {
     /// `asc` otherwise.
     #[serde(default)]
     pub sort_dir: Option<String>,
+    /// Cascade levels to include. Empty/missing means all levels.
+    #[serde(default)]
+    pub levels: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -535,6 +538,10 @@ pub struct ResultPageDto {
     pub page: u32,
     pub limit: u32,
     pub total: u64,
+    #[serde(default)]
+    pub available_levels: Vec<u8>,
+    #[serde(default)]
+    pub level_counts: BTreeMap<u8, u64>,
     pub rows: Vec<MatchPairDto>,
 }
 
@@ -560,6 +567,9 @@ pub struct ExportRequestDto {
     /// Minimum confidence (0..=100) for export rows.
     #[serde(default)]
     pub min_confidence: Option<f32>,
+    /// Cascade levels to include in export. Empty/missing means all levels.
+    #[serde(default)]
+    pub levels: Vec<u8>,
     /// When true, append all non-standard source/target table columns.
     #[serde(default)]
     pub include_extra_fields: bool,

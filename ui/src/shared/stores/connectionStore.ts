@@ -45,25 +45,41 @@ export const useConnectionStore = create<ConnectionStore>((set) => ({
   source: { ...emptySide },
   target: { ...emptySide },
   setLoading: (side, loading) =>
-    set((s) => ({ [side]: { ...s[side], loading } } as Partial<ConnectionStore>)),
+    set(
+      (s) => ({ [side]: { ...s[side], loading } }) as Partial<ConnectionStore>,
+    ),
   setError: (side, error) =>
-    set((s) => ({ [side]: { ...s[side], error } } as Partial<ConnectionStore>)),
+    set((s) => ({ [side]: { ...s[side], error } }) as Partial<ConnectionStore>),
   setSession: (side, session) =>
-    set((s) => ({
-      [side]: { ...s[side], session, error: null },
-    } as Partial<ConnectionStore>)),
+    set(
+      (s) =>
+        ({
+          [side]: { ...s[side], session, error: null },
+        }) as Partial<ConnectionStore>,
+    ),
   setTables: (side, tables) =>
-    set((s) => ({ [side]: { ...s[side], tables } } as Partial<ConnectionStore>)),
+    set(
+      (s) => ({ [side]: { ...s[side], tables } }) as Partial<ConnectionStore>,
+    ),
   setSelectedTable: (side, selectedTable) =>
-    set((s) => ({
-      [side]: { ...s[side], selectedTable, columns: null, rowCount: null },
-    } as Partial<ConnectionStore>)),
+    set(
+      (s) =>
+        ({
+          [side]: { ...s[side], selectedTable, columns: null, rowCount: null },
+        }) as Partial<ConnectionStore>,
+    ),
   setColumns: (side, columns) =>
-    set((s) => ({ [side]: { ...s[side], columns } } as Partial<ConnectionStore>)),
+    set(
+      (s) => ({ [side]: { ...s[side], columns } }) as Partial<ConnectionStore>,
+    ),
   setRowCount: (side, rowCount) =>
-    set((s) => ({ [side]: { ...s[side], rowCount } } as Partial<ConnectionStore>)),
-  resetSide: (side) => set(() => ({ [side]: { ...emptySide } } as Partial<ConnectionStore>)),
-  reset: () => set(() => ({ source: { ...emptySide }, target: { ...emptySide } })),
+    set(
+      (s) => ({ [side]: { ...s[side], rowCount } }) as Partial<ConnectionStore>,
+    ),
+  resetSide: (side) =>
+    set(() => ({ [side]: { ...emptySide } }) as Partial<ConnectionStore>),
+  reset: () =>
+    set(() => ({ source: { ...emptySide }, target: { ...emptySide } })),
 }));
 
 export function readinessForRun(state: ConnectionStore): {

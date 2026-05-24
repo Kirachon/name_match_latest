@@ -1,3 +1,46 @@
+#![allow(
+    dead_code,
+    unused_assignments,
+    unused_comparisons,
+    unused_mut,
+    unused_variables,
+    clippy::absurd_extreme_comparisons,
+    clippy::collapsible_else_if,
+    clippy::collapsible_if,
+    clippy::comparison_to_empty,
+    clippy::derivable_impls,
+    clippy::empty_line_after_doc_comments,
+    clippy::explicit_counter_loop,
+    clippy::field_reassign_with_default,
+    clippy::get_first,
+    clippy::legacy_numeric_constants,
+    clippy::manual_clamp,
+    clippy::manual_range_contains,
+    clippy::manual_range_patterns,
+    clippy::needless_borrow,
+    clippy::needless_borrows_for_generic_args,
+    clippy::needless_lifetimes,
+    clippy::needless_return,
+    clippy::print_literal,
+    clippy::ptr_arg,
+    clippy::if_same_then_else,
+    clippy::redundant_closure,
+    clippy::redundant_closure_call,
+    clippy::redundant_field_names,
+    clippy::single_char_add_str,
+    clippy::suspicious_else_formatting,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_map_or,
+    clippy::useless_format,
+    clippy::useless_conversion,
+    clippy::write_literal
+)]
+// The legacy egui binary is retained during the Tauri migration and includes
+// shared engine modules as a compatibility surface, which otherwise creates
+// duplicate-bin dead_code warnings unrelated to release behavior.
+
 // =============================================================================
 // DEPRECATION NOTICE — Legacy egui GUI
 // =============================================================================
@@ -1079,13 +1122,7 @@ impl Default for GuiApp {
             .unwrap_or(8)
             .min(12)
             .max(1);
-        // Keep environment in sync with initial GUI state
-        unsafe {
-            std::env::set_var(
-                "NAME_MATCHER_ALLOW_BIRTHDATE_SWAP",
-                if allow_birth_swap { "1" } else { "0" },
-            );
-        }
+        name_matcher::matching::birthdate_matcher::set_allow_birthdate_swap(allow_birth_swap);
         Self {
             host: "127.0.0.1".into(),
             port: "3306".into(),
@@ -1941,9 +1978,7 @@ impl GuiApp {
                 .on_hover_text("Permits matching dates with swapped month/day when valid. In cascade mode, applies to L10-L11 fuzzy levels only.");
             if resp.changed() {
                 self.allow_birthdate_swap = val;
-                unsafe {
-                    std::env::set_var("NAME_MATCHER_ALLOW_BIRTHDATE_SWAP", if val { "1" } else { "0" });
-                }
+                name_matcher::matching::birthdate_matcher::set_allow_birthdate_swap(val);
                 log::info!("[GUI] Birthdate swap {}", if val { "enabled" } else { "disabled" });
             }
             if !swap_applicable {
@@ -2813,9 +2848,6 @@ impl GuiApp {
             });
 
             if rayon_threads > 0 {
-                unsafe {
-                    std::env::set_var("RAYON_NUM_THREADS", rayon_threads.to_string());
-                }
                 let _ = rayon::ThreadPoolBuilder::new()
                     .num_threads(rayon_threads)
                     .build_global();

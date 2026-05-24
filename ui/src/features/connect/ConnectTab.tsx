@@ -6,6 +6,7 @@ import {
   getTableColumns,
   listTables,
   testConnection,
+  validateDbCredentials,
 } from "@/shared/tauri/commands";
 import {
   type SessionSide,
@@ -36,6 +37,7 @@ import {
 } from "./persistence";
 
 type Form = DbCredentialsDto;
+type CredentialStatus = "checking" | "valid" | "expired" | "unknown";
 
 const blankForm: Form = {
   host: "127.0.0.1",
@@ -58,12 +60,14 @@ export function ConnectTab({ onAdvance }: { onAdvance: () => void }) {
               description="Connect both databases, then pick the source and target tables. The Configure tab unlocks once schemas are verified."
             />
             <ul className="text-sm text-ink-300 list-disc list-inside marker:text-accent-500 space-y-1">
-              <li>Required columns are inferred automatically per algorithm.</li>
+              <li>
+                Required columns are inferred automatically per algorithm.
+              </li>
               <li>Row counts are estimates — they’re cached per session.</li>
               <li>
-                Passwords are dropped from memory after the pool is built.
-                Saved passwords (opt-in) are stored unencrypted in the app
-                data directory.
+                Passwords are dropped from memory after the pool is built. Saved
+                passwords (opt-in) are stored unencrypted in the app data
+                directory.
               </li>
             </ul>
           </div>
@@ -116,6 +120,8 @@ function ConnectionCard({ side }: { side: SessionSide }) {
   const [savedTable, setSavedTable] = useState<string | null>(null);
   const [lastConnectedMs, setLastConnectedMs] = useState<number | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [credentialStatus, setCredentialStatus] =
+    useState<CredentialStatus>("unknown");
 
   // Hydrate from persisted store on first mount.
   useEffect(() => {
@@ -137,12 +143,42 @@ function ConnectionCard({ side }: { side: SessionSide }) {
         setSavedTable(rec.table ?? null);
         setLastConnectedMs(rec.last_connected_unix_ms);
         setHydrated(true);
+        if (rec.password_saved && rec.password) {
+          setCredentialStatus("checking");
+          validateDbCredentials({
+            host: rec.host,
+            port: rec.port,
+            username: rec.username,
+            password: rec.password,
+            database: rec.database,
+          })
+            .then(() => {
+              if (!cancelled) setCredentialStatus("valid");
+            })
+            .catch(async () => {
+              if (cancelled) return;
+              setCredentialStatus("expired");
+              await clearPersistedPassword(side).catch(() => {});
+              setRememberPassword(false);
+              setForm((f) => ({ ...f, password: "" }));
+              pushToast({
+                tone: "warn",
+                title: "Saved credentials expired",
+                message: "Cleared the saved password. Please re-enter it.",
+              });
+            });
+        } else {
+          setCredentialStatus("unknown");
+        }
       })
-      .catch(() => setHydrated(true));
+      .catch(() => {
+        setCredentialStatus("unknown");
+        setHydrated(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, [side]);
+  }, [side, pushToast]);
 
   // Apply default file_stem from selected source table.
   const setExport = useConfigStore((s) => s.setExport);
@@ -181,7 +217,8 @@ function ConnectionCard({ side }: { side: SessionSide }) {
         pushToast({
           tone: "warn",
           title: "Could not save connection",
-          message: "Local store write failed. Re-enter credentials next launch.",
+          message:
+            "Local store write failed. Re-enter credentials next launch.",
         });
       });
 
@@ -304,6 +341,9 @@ function ConnectionCard({ side }: { side: SessionSide }) {
       {hydrated && lastConnectedMs && !slice.session && (
         <LastConnectedBadge unixMs={lastConnectedMs} />
       )}
+      {hydrated && !slice.session && credentialStatus !== "unknown" && (
+        <CredentialValidationBadge status={credentialStatus} />
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Host" htmlFor={`host-${side}`} className="col-span-1">
@@ -347,11 +387,7 @@ function ConnectionCard({ side }: { side: SessionSide }) {
             disabled={!!slice.session}
           />
         </Field>
-        <Field
-          label="Database"
-          htmlFor={`db-${side}`}
-          className="col-span-2"
-        >
+        <Field label="Database" htmlFor={`db-${side}`} className="col-span-2">
           <input
             id={`db-${side}`}
             className="input"
@@ -463,6 +499,30 @@ function LastConnectedBadge({ unixMs }: { unixMs: number }) {
   return (
     <div className="text-2xs text-ink-500 animate-fade-in">
       Restored from last session · {dateStr} {timeStr}
+    </div>
+  );
+}
+
+function CredentialValidationBadge({
+  status,
+}: {
+  status: Exclude<CredentialStatus, "unknown">;
+}) {
+  const tone =
+    status === "valid" ? "ok" : status === "expired" ? "danger" : "info";
+  const label =
+    status === "valid"
+      ? "Saved credentials still valid"
+      : status === "expired"
+        ? "Saved credentials expired"
+        : "Checking saved credentials";
+  return (
+    <div
+      className="text-2xs text-ink-400 flex items-center gap-2"
+      aria-live="polite"
+    >
+      <StatusDot tone={tone} />
+      <span>{label}</span>
     </div>
   );
 }

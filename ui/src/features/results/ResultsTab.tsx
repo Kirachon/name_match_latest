@@ -4,11 +4,18 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import {
   exportResults,
+  forgetMatchingJob,
   getMatchingStatus,
   getResultsPage,
 } from "@/shared/tauri/commands";
 import { useJobStore } from "@/shared/stores/jobStore";
 import { useConfigStore } from "@/shared/stores/configStore";
+import {
+  DEFAULT_RESULTS_VIEW_STATE,
+  useResultsStore,
+  type ResultsSortDir,
+  type ResultsSortKey,
+} from "@/shared/stores/resultsStore";
 import { useToastStore } from "@/shared/stores/toastStore";
 import {
   Button,
@@ -23,6 +30,7 @@ import {
   formatNumber,
   formatPercent,
 } from "@/shared/lib/format";
+import { JOB_STATE_TERMINAL } from "@/shared/tauri/types";
 import type {
   ExportFormatDto,
   JobSummaryDto,
@@ -35,20 +43,27 @@ const PAGE_LIMIT = 1000;
 
 export function ResultsTab() {
   const activeJobId = useJobStore((s) => s.activeJobId);
+  const setActiveJob = useJobStore((s) => s.setActive);
+  const viewState = useResultsStore((s) =>
+    activeJobId
+      ? (s.jobs[activeJobId] ?? DEFAULT_RESULTS_VIEW_STATE)
+      : DEFAULT_RESULTS_VIEW_STATE,
+  );
+  const patchResultView = useResultsStore((s) => s.patchJob);
+  const resetResultView = useResultsStore((s) => s.resetJob);
   const [summary, setSummary] = useState<JobSummaryDto | null>(null);
   const [page, setPage] = useState<ResultPageDto | null>(null);
-  const [pageIndex, setPageIndex] = useState(0);
-  const [search, setSearch] = useState("");
-  const debouncedSearch = useDebounced(search, 200);
-  const [sortBy, setSortBy] = useState<
-    "row_id" | "confidence" | "source_name" | "target_name"
-  >("confidence");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [minConf, setMinConf] = useState<number>(0);
-  const debouncedConf = useDebounced(minConf, 200);
+  const debouncedSearch = useDebounced(viewState.search, 200);
+  const debouncedConf = useDebounced(viewState.minConf, 200);
   const [loading, setLoading] = useState(false);
   const pushToast = useToastStore((s) => s.push);
   const exportCfg = useConfigStore((s) => s.export);
+  const { pageIndex, search, sortBy, sortDir, minConf, levels } = viewState;
+
+  function patchView(patch: Partial<typeof viewState>) {
+    if (!activeJobId) return;
+    patchResultView(activeJobId, patch);
+  }
 
   useEffect(() => {
     if (!activeJobId) return;
@@ -78,9 +93,16 @@ export function ResultsTab() {
       sort_by: sortBy,
       sort_dir: sortDir,
       min_confidence: debouncedConf > 0 ? debouncedConf : null,
+      levels,
     })
       .then((p) => {
-        if (!cancelled) setPage(p);
+        if (!cancelled) {
+          setPage(p);
+          const maxPage = Math.max(0, Math.ceil(p.total / PAGE_LIMIT) - 1);
+          if (pageIndex > maxPage) {
+            patchResultView(activeJobId, { pageIndex: maxPage });
+          }
+        }
       })
       .catch((err: unknown) => {
         pushToast({
@@ -98,7 +120,17 @@ export function ResultsTab() {
     return () => {
       cancelled = true;
     };
-  }, [activeJobId, pageIndex, debouncedSearch, sortBy, sortDir, debouncedConf, pushToast]);
+  }, [
+    activeJobId,
+    pageIndex,
+    debouncedSearch,
+    sortBy,
+    sortDir,
+    debouncedConf,
+    levels,
+    pushToast,
+    patchResultView,
+  ]);
 
   if (!activeJobId) {
     return (
@@ -114,12 +146,23 @@ export function ResultsTab() {
 
   const total = page?.total ?? 0;
   const lastPage = Math.max(0, Math.ceil(total / PAGE_LIMIT) - 1);
+  const availableLevels = page?.available_levels ?? [];
+  const levelCounts = page?.level_counts ?? {};
+
+  function toggleLevel(level: number) {
+    const next = levels.includes(level)
+      ? levels.filter((value) => value !== level)
+      : [...levels, level].sort((a, b) => a - b);
+    patchView({ levels: next, pageIndex: 0 });
+  }
 
   async function onExport(format: ExportFormatDto) {
     if (!activeJobId) return;
     let dir = exportCfg.output_directory;
     if (!dir) {
-      const picked = await open({ directory: true, multiple: false }).catch(() => null);
+      const picked = await open({ directory: true, multiple: false }).catch(
+        () => null,
+      );
       if (typeof picked !== "string") return;
       dir = picked;
     }
@@ -130,6 +173,7 @@ export function ResultsTab() {
         output_directory: dir,
         file_stem: exportCfg.file_stem || "matches",
         min_confidence: minConf > 0 ? minConf : null,
+        levels,
         include_extra_fields: exportCfg.include_extra_fields,
       });
       pushToast({
@@ -166,6 +210,37 @@ export function ResultsTab() {
     }
   }
 
+  async function onForgetJob() {
+    if (
+      !activeJobId ||
+      !summary ||
+      !JOB_STATE_TERMINAL.includes(summary.state)
+    ) {
+      return;
+    }
+    try {
+      await forgetMatchingJob(activeJobId);
+      resetResultView(activeJobId);
+      setActiveJob(null);
+      setSummary(null);
+      setPage(null);
+      pushToast({
+        tone: "success",
+        title: "Run removed",
+        message: "The completed run was removed from local history.",
+      });
+    } catch (err: unknown) {
+      pushToast({
+        tone: "error",
+        title: "Could not remove run",
+        message:
+          typeof err === "object" && err && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err),
+      });
+    }
+  }
+
   return (
     <div className="space-y-5">
       <Card>
@@ -194,6 +269,15 @@ export function ResultsTab() {
               >
                 Open folder
               </Button>
+              <Button
+                tone="ghost"
+                onClick={onForgetJob}
+                disabled={
+                  !summary || !JOB_STATE_TERMINAL.includes(summary.state)
+                }
+              >
+                Forget
+              </Button>
             </div>
           }
         />
@@ -204,8 +288,7 @@ export function ResultsTab() {
               placeholder="filter source / target full name…"
               value={search}
               onChange={(e) => {
-                setSearch(e.target.value);
-                setPageIndex(0);
+                patchView({ search: e.target.value, pageIndex: 0 });
               }}
             />
           </Field>
@@ -218,8 +301,10 @@ export function ResultsTab() {
               step={1}
               value={minConf}
               onChange={(e) => {
-                setMinConf(Number(e.target.value || 0));
-                setPageIndex(0);
+                patchView({
+                  minConf: Number(e.target.value || 0),
+                  pageIndex: 0,
+                });
               }}
             />
           </Field>
@@ -228,8 +313,10 @@ export function ResultsTab() {
               className="select"
               value={sortBy}
               onChange={(e) => {
-                setSortBy(e.target.value as typeof sortBy);
-                setPageIndex(0);
+                patchView({
+                  sortBy: e.target.value as ResultsSortKey,
+                  pageIndex: 0,
+                });
               }}
             >
               <option value="confidence">Confidence</option>
@@ -243,8 +330,10 @@ export function ResultsTab() {
               className="select"
               value={sortDir}
               onChange={(e) => {
-                setSortDir(e.target.value as typeof sortDir);
-                setPageIndex(0);
+                patchView({
+                  sortDir: e.target.value as ResultsSortDir,
+                  pageIndex: 0,
+                });
               }}
             >
               <option value="desc">Descending</option>
@@ -267,11 +356,37 @@ export function ResultsTab() {
                 Include all extra fields on export
               </span>
               <span className="block text-xs text-ink-400">
-                Adds every non-standard source and target table column to CSV/XLSX.
+                Adds every non-standard source and target table column to
+                CSV/XLSX.
               </span>
             </span>
           </label>
         </div>
+        {availableLevels.length > 0 && (
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <Button
+              tone={levels.length === 0 ? "primary" : "ghost"}
+              size="sm"
+              onClick={() => patchView({ levels: [], pageIndex: 0 })}
+            >
+              All
+            </Button>
+            {availableLevels.map((level) => {
+              const active = levels.includes(level);
+              return (
+                <Button
+                  key={level}
+                  tone={active ? "primary" : "ghost"}
+                  size="sm"
+                  onClick={() => toggleLevel(level)}
+                >
+                  L{String(level).padStart(2, "0")}{" "}
+                  {formatNumber(levelCounts[String(level)] ?? 0)}
+                </Button>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <Card padded={false}>
@@ -284,7 +399,9 @@ export function ResultsTab() {
             <Button
               tone="ghost"
               size="sm"
-              onClick={() => setPageIndex(Math.max(0, pageIndex - 1))}
+              onClick={() =>
+                patchView({ pageIndex: Math.max(0, pageIndex - 1) })
+              }
               disabled={pageIndex === 0}
             >
               ← Prev
@@ -295,7 +412,9 @@ export function ResultsTab() {
             <Button
               tone="ghost"
               size="sm"
-              onClick={() => setPageIndex(Math.min(lastPage, pageIndex + 1))}
+              onClick={() =>
+                patchView({ pageIndex: Math.min(lastPage, pageIndex + 1) })
+              }
               disabled={pageIndex >= lastPage}
             >
               Next →
@@ -328,7 +447,9 @@ function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
       aria-label="Match results"
     >
       <div className="data-row data-header h-9" role="row">
-        <div role="columnheader" className="font-mono">#</div>
+        <div role="columnheader" className="font-mono">
+          #
+        </div>
         <div role="columnheader">Source ID</div>
         <div role="columnheader">Source name</div>
         <div role="columnheader">Source DOB</div>
@@ -396,11 +517,17 @@ function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
               >
                 {r.matched_at_level
                   ? `L${String(r.matched_at_level).padStart(2, "0")}${
-                      r.match_method ? ` · ${r.match_method.replace(/^L\d+\s*-\s*/, "")}` : ""
+                      r.match_method
+                        ? ` · ${r.match_method.replace(/^L\d+\s*-\s*/, "")}`
+                        : ""
                     }`
                   : "—"}
               </div>
-              <div role="cell" className="text-2xs text-ink-400 truncate" title={r.matched_fields.join(", ")}>
+              <div
+                role="cell"
+                className="text-2xs text-ink-400 truncate"
+                title={r.matched_fields.join(", ")}
+              >
                 {r.matched_fields.join(", ")}
               </div>
             </div>

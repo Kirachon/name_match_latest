@@ -8,7 +8,6 @@ use std::collections::HashMap;
 
 use crate::config::DatabaseConfig;
 use crate::matching::MatchingAlgorithm;
-use crate::util::envfile::parse_env_file;
 
 /// Parsed CLI arguments for the matching run.
 #[derive(Debug, Clone)]

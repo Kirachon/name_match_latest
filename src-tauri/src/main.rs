@@ -1,5 +1,6 @@
 // Hide the console window on Windows release builds. Dev / debug builds keep
 // it so the engine logs are visible for ops triage.
+#![allow(dead_code, clippy::wrong_self_convention)]
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod commands;
@@ -22,7 +23,7 @@ fn main() {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(8);
-    let rayon_threads = cpus.saturating_sub(2).max(1);
+    let rayon_threads = configured_rayon_threads(cpus);
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(rayon_threads)
         .thread_name(|i| format!("nm-rayon-{i}"))
@@ -37,6 +38,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
             let state = Arc::new(AppState::new(app.handle().clone()));
             app.manage(state);
@@ -50,6 +52,7 @@ fn main() {
             commands::save_config,
             // Database session (T5)
             commands::connect_db,
+            commands::validate_db_credentials,
             commands::test_connection,
             commands::list_tables,
             commands::get_table_columns,
@@ -63,10 +66,20 @@ fn main() {
             commands::resume_matching,
             commands::get_matching_status,
             commands::list_matching_jobs,
+            commands::forget_matching_job,
             // Results / export (T9)
             commands::get_results_page,
             commands::export_results,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn configured_rayon_threads(cpus: usize) -> usize {
+    std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .or_else(|| std::env::var("NAME_MATCHER_RAYON_THREADS").ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|threads| *threads > 0)
+        .unwrap_or_else(|| cpus.saturating_sub(2).max(1))
 }

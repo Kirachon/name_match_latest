@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ErrorBoundary } from "@/app/ErrorBoundary";
 import { EventBridge } from "@/app/EventBridge";
 import { StatusRail } from "@/app/StatusRail";
 import { TabBar, type TabId } from "@/app/TabBar";
@@ -46,21 +47,23 @@ export default function App() {
       <StatusRail system={system} />
       <TabBar active={tab} onChange={setTab} />
       <main className="flex-1 overflow-auto">
-        <div
-          role="tabpanel"
-          id={`tabpanel-${tab}`}
-          aria-labelledby={`tab-${tab}`}
-          className="mx-auto max-w-[1400px] px-6 py-6 animate-fade-in"
-        >
-          {tab === "connect" && (
-            <ConnectTab onAdvance={() => setTab("configure")} />
-          )}
-          {tab === "configure" && (
-            <ConfigureTab onAdvance={() => setTab("run")} />
-          )}
-          {tab === "run" && <RunTab onComplete={() => setTab("results")} />}
-          {tab === "results" && <ResultsTab />}
-        </div>
+        <ErrorBoundary resetKey={tab}>
+          <div
+            role="tabpanel"
+            id={`tabpanel-${tab}`}
+            aria-labelledby={`tab-${tab}`}
+            className="mx-auto max-w-[1400px] px-6 py-6 animate-fade-in"
+          >
+            {tab === "connect" && (
+              <ConnectTab onAdvance={() => setTab("configure")} />
+            )}
+            {tab === "configure" && (
+              <ConfigureTab onAdvance={() => setTab("run")} />
+            )}
+            {tab === "run" && <RunTab onComplete={() => setTab("results")} />}
+            {tab === "results" && <ResultsTab />}
+          </div>
+        </ErrorBoundary>
       </main>
       <ToastLayer />
     </div>

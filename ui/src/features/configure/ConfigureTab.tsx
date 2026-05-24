@@ -109,7 +109,9 @@ function ModeOption({
         {active && <Pill tone="info">Active</Pill>}
       </div>
       <div className="text-xs text-ink-300 mb-2">{subtitle}</div>
-      <div className="text-2xs uppercase tracking-wider text-ink-500">{tag}</div>
+      <div className="text-2xs uppercase tracking-wider text-ink-500">
+        {tag}
+      </div>
     </button>
   );
 }
@@ -140,7 +142,11 @@ function AlgorithmCard() {
         title="Algorithm"
         description="Pick the matching strategy. Determinism beats fuzziness when both tables are clean; fuzzy variants resilient against typos and middle-name gaps."
       />
-      <div role="radiogroup" aria-label="Matching algorithm" className="grid md:grid-cols-2 gap-3">
+      <div
+        role="radiogroup"
+        aria-label="Matching algorithm"
+        className="grid md:grid-cols-2 gap-3"
+      >
         {ALGORITHMS.map((a) => (
           <AlgorithmOption
             key={a.id}
@@ -243,8 +249,8 @@ function GpuCard() {
           isDeep
             ? "Deep Match uses GPU acceleration mainly for fuzzy cascade levels L10/L11. Exact levels L1-L9 remain CPU-style matching."
             : meta.gpuApplicable
-            ? "GPU offload is available for this algorithm. Toggle it off to force CPU."
-            : "This algorithm does not benefit from GPU acceleration."
+              ? "GPU offload is available for this algorithm. Toggle it off to force CPU."
+              : "This algorithm does not benefit from GPU acceleration."
         }
         action={
           <Pill tone={gpuOff ? "mute" : "info"}>
@@ -270,9 +276,7 @@ function GpuCard() {
             )}
           >
             <div className="font-medium text-ink-50">{labelMode(m)}</div>
-            <div className="text-2xs text-ink-400 mt-0.5">
-              {modeHint(m)}
-            </div>
+            <div className="text-2xs text-ink-400 mt-0.5">{modeHint(m)}</div>
           </button>
         ))}
       </div>
@@ -282,7 +286,11 @@ function GpuCard() {
           onChange={(b) => setGpu({ use_hash_join: b })}
           disabled={gpuOff}
           reason={gpuOff ? "Enable GPU mode to use hash-join" : undefined}
-          label={isDeep ? "GPU hash-join for exact helpers" : "GPU hash-join (Options 1–2)"}
+          label={
+            isDeep
+              ? "GPU hash-join for exact helpers"
+              : "GPU hash-join (Options 1–2)"
+          }
           description={
             isDeep
               ? "Available for exact matching helpers when the engine can use GPU pre-work."
@@ -301,8 +309,14 @@ function GpuCard() {
           checked={gpu.use_levenshtein_full_scoring}
           onChange={(b) => setGpu({ use_levenshtein_full_scoring: b })}
           disabled={gpuOff}
-          reason={gpuOff ? "Enable GPU mode to use full GPU scoring" : undefined}
-          label={isDeep ? "GPU fuzzy scoring for L10/L11" : "GPU Levenshtein scoring (Option 7)"}
+          reason={
+            gpuOff ? "Enable GPU mode to use full GPU scoring" : undefined
+          }
+          label={
+            isDeep
+              ? "GPU fuzzy scoring for L10/L11"
+              : "GPU Levenshtein scoring (Option 7)"
+          }
           description={
             isDeep
               ? "Uses GPU scoring for fuzzy cascade levels where CUDA is available."
@@ -313,7 +327,9 @@ function GpuCard() {
           checked={gpu.dynamic_tuning}
           onChange={(b) => setGpu({ dynamic_tuning: b })}
           disabled={gpuOff}
-          reason={gpuOff ? "Enable GPU mode to allow dynamic tuning" : undefined}
+          reason={
+            gpuOff ? "Enable GPU mode to allow dynamic tuning" : undefined
+          }
           label="Dynamic GPU tuning"
           description="Auto-adjusts batch sizes from VRAM telemetry."
         />
@@ -367,7 +383,11 @@ function StreamingCard() {
                     : "border-ink-800 bg-ink-900/40 text-ink-300 hover:border-ink-700",
                 )}
               >
-                {m === "in-memory" ? "In-memory" : m === "auto" ? "Auto" : "Streaming"}
+                {m === "in-memory"
+                  ? "In-memory"
+                  : m === "auto"
+                    ? "Auto"
+                    : "Streaming"}
               </button>
             ))}
           </div>
@@ -388,7 +408,10 @@ function StreamingCard() {
             }
           />
         </Field>
-        <Field label="Partition strategy" help="last_initial · birthyear5 · or empty for none.">
+        <Field
+          label="Partition strategy"
+          help="last_initial · birthyear5 · or empty for none."
+        >
           <select
             className="select"
             value={s.partition_strategy ?? ""}
@@ -665,7 +688,10 @@ function SummaryCard({ onAdvance }: { onAdvance: () => void }) {
                 : "—"
             }
           />
-          <Row label="GPU" value={gpu.mode === "cpu" ? "Off (CPU)" : labelMode(gpu.mode)} />
+          <Row
+            label="GPU"
+            value={gpu.mode === "cpu" ? "Off (CPU)" : labelMode(gpu.mode)}
+          />
           <Row
             label="Streaming"
             value={`${stream.mode} · batch ${formatNumber(stream.batch_size)}`}

@@ -20,7 +20,7 @@ pub mod store;
 
 pub use dto::*;
 pub use sink::{ConsoleEventSink, EventSink, MultiEventSink, NullEventSink};
-pub use store::{ResultStore, StoredJob};
+pub use store::{ResultStore, ResultStoreConfig, StoredJob};
 
 /// Runtime CUDA probe used by the Tauri `cuda_diagnostics` command and by
 /// the legacy egui GPU section. Returns populated `CudaDiagnosticsDto`
@@ -272,6 +272,12 @@ impl JobRegistry {
             .map(|(id, h)| (id.clone(), h.state()))
             .collect()
     }
+    pub fn prune_terminal(&self) -> usize {
+        let mut g = self.jobs.lock().expect("registry poisoned");
+        let before = g.len();
+        g.retain(|_, handle| !handle.state().is_terminal());
+        before.saturating_sub(g.len())
+    }
 }
 
 /// The shared run service. Stateless wrapper that takes the registry, store,
@@ -366,12 +372,16 @@ impl RunService {
 fn set_state(
     state: &Arc<Mutex<JobStateDto>>,
     sink: &dyn EventSink,
+    store: Option<&ResultStore>,
     job_id: &str,
     new: JobStateDto,
 ) {
     {
         let mut g = state.lock().expect("state mutex poisoned");
         *g = new;
+    }
+    if let Some(store) = store {
+        store.set_state(job_id, new);
     }
     sink.emit_state(JobStateEventDto {
         job_id: job_id.to_string(),
@@ -380,10 +390,19 @@ fn set_state(
     });
 }
 
-fn fail_state(state: &Arc<Mutex<JobStateDto>>, sink: &dyn EventSink, job_id: &str, msg: String) {
+fn fail_state(
+    state: &Arc<Mutex<JobStateDto>>,
+    sink: &dyn EventSink,
+    store: Option<&ResultStore>,
+    job_id: &str,
+    msg: String,
+) {
     {
         let mut g = state.lock().expect("state mutex poisoned");
         *g = JobStateDto::Failed;
+    }
+    if let Some(store) = store {
+        store.set_state(job_id, JobStateDto::Failed);
     }
     sink.emit_log(LogEntryDto {
         job_id: job_id.to_string(),
@@ -417,7 +436,13 @@ fn run_worker(
     loader: TableLoader,
 ) {
     let sink_ref: &dyn EventSink = sink.as_ref();
-    set_state(&state, sink_ref, &job_id, JobStateDto::Validating);
+    set_state(
+        &state,
+        sink_ref,
+        Some(store.as_ref()),
+        &job_id,
+        JobStateDto::Validating,
+    );
     sink.emit_log(LogEntryDto {
         job_id: job_id.clone(),
         timestamp_ms: now_ms(),
@@ -432,7 +457,13 @@ fn run_worker(
     });
 
     // 1) Load tables.
-    set_state(&state, sink_ref, &job_id, JobStateDto::Running);
+    set_state(
+        &state,
+        sink_ref,
+        Some(store.as_ref()),
+        &job_id,
+        JobStateDto::Running,
+    );
     sink.emit_progress_with_stage(&job_id, PipelineStageDto::Load, 0, 100, "loading tables");
     let load_result = (loader)(&config.source, &config.target, &cancel, sink_ref);
     if cancel.is_cancelled() {
@@ -442,13 +473,25 @@ fn run_worker(
             level: LogLevelDto::Warn,
             message: "Cancellation requested during table load".to_string(),
         });
-        set_state(&state, sink_ref, &job_id, JobStateDto::Cancelled);
+        set_state(
+            &state,
+            sink_ref,
+            Some(store.as_ref()),
+            &job_id,
+            JobStateDto::Cancelled,
+        );
         return;
     }
     let (t1, t2, src_label, tgt_label) = match load_result {
         Ok(v) => v,
         Err(e) => {
-            fail_state(&state, sink_ref, &job_id, format!("Table load failed: {e}"));
+            fail_state(
+                &state,
+                sink_ref,
+                Some(store.as_ref()),
+                &job_id,
+                format!("Table load failed: {e}"),
+            );
             return;
         }
     };
@@ -465,13 +508,16 @@ fn run_worker(
         ),
     });
 
-    // 2) Apply matching options.
-    if let Some(threads) = config.options.rayon_threads {
-        unsafe {
-            std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
-        }
-    } else if config.options.auto_optimize {
-        apply_auto_optimize(config.algorithm.to_engine());
+    // 2) Resolve job-local matching options. Runtime jobs use a scoped Rayon
+    // pool so one run cannot mutate process-wide thread settings for another.
+    let scoped_rayon_threads = resolve_rayon_threads(&config.options, config.algorithm.to_engine());
+    if let Some(threads) = scoped_rayon_threads {
+        sink.emit_log(LogEntryDto {
+            job_id: job_id.clone(),
+            timestamp_ms: now_ms(),
+            level: LogLevelDto::Info,
+            message: format!("Using scoped Rayon pool with {threads} worker threads"),
+        });
     }
 
     let backend = match config.gpu.mode {
@@ -502,7 +548,13 @@ fn run_worker(
     // 3) Run the engine. Engine callbacks emit throttled progress through the
     //    sink. Cancellation and pause are both checked inside this callback
     //    at safe boundaries (between progress emissions / batches).
-    set_state(&state, sink_ref, &job_id, JobStateDto::Running);
+    set_state(
+        &state,
+        sink_ref,
+        Some(store.as_ref()),
+        &job_id,
+        JobStateDto::Running,
+    );
     let engine_algo = config.algorithm.to_engine();
     let job_id_for_progress = job_id.clone();
     let sink_for_progress = Arc::clone(&sink);
@@ -708,22 +760,30 @@ fn run_worker(
         };
 
         let cascade_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::matching::cascade::run_cascade_inmemory_with_engine_progress(
-                &t1,
-                &t2,
-                &cascade_cfg,
-                &geo_status,
-                cascade_progress,
-                cascade_engine_progress,
-            )
+            run_in_scoped_rayon(scoped_rayon_threads, || {
+                crate::matching::cascade::run_cascade_inmemory_with_engine_progress(
+                    &t1,
+                    &t2,
+                    &cascade_cfg,
+                    &geo_status,
+                    cascade_progress,
+                    cascade_engine_progress,
+                )
+            })
         }));
 
         if cancel.is_cancelled() {
-            set_state(&state, sink_ref, &job_id, JobStateDto::Cancelled);
+            set_state(
+                &state,
+                sink_ref,
+                Some(store.as_ref()),
+                &job_id,
+                JobStateDto::Cancelled,
+            );
             return;
         }
         match cascade_result {
-            Ok(cr) => {
+            Ok(Ok(cr)) => {
                 // Flatten level entries into MatchPair list, attaching the
                 // level number to each pair via a parallel `level_for_pair`
                 // vec we'll re-use when building DTOs.
@@ -746,15 +806,32 @@ fn run_worker(
                 worker_cascade_levels = Some(flat.iter().map(|(l, _)| *l).collect());
                 flat.into_iter().map(|(_, p)| p).collect()
             }
+            Ok(Err(e)) => {
+                fail_state(
+                    &state,
+                    sink_ref,
+                    Some(store.as_ref()),
+                    &job_id,
+                    format!("Scoped Rayon failed: {e}"),
+                );
+                return;
+            }
             Err(panic) => {
                 let msg = panic_message(&panic);
                 if cancel.is_cancelled() || msg.contains("__name_match_cancelled__") {
-                    set_state(&state, sink_ref, &job_id, JobStateDto::Cancelled);
+                    set_state(
+                        &state,
+                        sink_ref,
+                        Some(store.as_ref()),
+                        &job_id,
+                        JobStateDto::Cancelled,
+                    );
                     return;
                 }
                 fail_state(
                     &state,
                     sink_ref,
+                    Some(store.as_ref()),
                     &job_id,
                     format!("Cascade engine panicked: {msg}"),
                 );
@@ -836,10 +913,18 @@ fn run_worker(
         };
 
         let engine_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::matching::match_all_with_opts(&t1, &t2, engine_algo, mo, progress_cb)
+            run_in_scoped_rayon(scoped_rayon_threads, || {
+                crate::matching::match_all_with_opts(&t1, &t2, engine_algo, mo, progress_cb)
+            })
         }));
         if cancel.is_cancelled() {
-            set_state(&state, sink_ref, &job_id, JobStateDto::Cancelled);
+            set_state(
+                &state,
+                sink_ref,
+                Some(store.as_ref()),
+                &job_id,
+                JobStateDto::Cancelled,
+            );
             sink.emit_log(LogEntryDto {
                 job_id: job_id.clone(),
                 timestamp_ms: now_ms(),
@@ -849,11 +934,27 @@ fn run_worker(
             return;
         }
         match engine_result {
-            Ok(v) => v,
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                fail_state(
+                    &state,
+                    sink_ref,
+                    Some(store.as_ref()),
+                    &job_id,
+                    format!("Scoped Rayon failed: {e}"),
+                );
+                return;
+            }
             Err(panic) => {
                 let msg = panic_message(&panic);
                 if cancel.is_cancelled() || msg.contains("__name_match_cancelled__") {
-                    set_state(&state, sink_ref, &job_id, JobStateDto::Cancelled);
+                    set_state(
+                        &state,
+                        sink_ref,
+                        Some(store.as_ref()),
+                        &job_id,
+                        JobStateDto::Cancelled,
+                    );
                     sink.emit_log(LogEntryDto {
                         job_id: job_id.clone(),
                         timestamp_ms: now_ms(),
@@ -862,7 +963,13 @@ fn run_worker(
                     });
                     return;
                 }
-                fail_state(&state, sink_ref, &job_id, format!("Engine panicked: {msg}"));
+                fail_state(
+                    &state,
+                    sink_ref,
+                    Some(store.as_ref()),
+                    &job_id,
+                    format!("Engine panicked: {msg}"),
+                );
                 return;
             }
         }
@@ -927,6 +1034,7 @@ fn run_worker(
         fail_state(
             &state,
             sink_ref,
+            Some(store.as_ref()),
             &job_id,
             format!("Result store failed: {e}"),
         );
@@ -957,7 +1065,13 @@ fn run_worker(
         matches_found: count,
     });
     store.mark_finished(&job_id, count, now_ms());
-    set_state(&state, sink_ref, &job_id, JobStateDto::Completed);
+    set_state(
+        &state,
+        sink_ref,
+        Some(store.as_ref()),
+        &job_id,
+        JobStateDto::Completed,
+    );
 }
 
 fn full_name(p: &crate::models::Person) -> String {
@@ -1020,26 +1134,63 @@ fn match_remarks(p: &crate::matching::MatchPair, level: Option<u8>) -> String {
     }
 }
 
+fn run_in_scoped_rayon<T, F>(threads: Option<usize>, f: F) -> anyhow::Result<T>
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    if let Some(threads) = threads.filter(|threads| *threads > 0) {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("nm-job-rayon-{i}"))
+            .build()
+            .context("build scoped Rayon pool")?;
+        Ok(pool.install(f))
+    } else {
+        Ok(f())
+    }
+}
+
 /// Inline copy of `orchestrator::apply_auto_optimize` so the lib does not need
 /// to expose the bin-only `orchestrator` and `cli` modules.
-fn apply_auto_optimize(algorithm: crate::matching::MatchingAlgorithm) {
+fn auto_optimize_rayon_threads(algorithm: crate::matching::MatchingAlgorithm) -> Option<usize> {
     if let Ok(profile) = crate::optimization::SystemProfile::detect() {
         let inm = crate::optimization::calculate_inmemory_config(&profile, algorithm, false);
         if inm.rayon_threads > 0 {
-            unsafe {
-                std::env::set_var("RAYON_NUM_THREADS", inm.rayon_threads.to_string());
-            }
             log::info!(
-                "Auto-Optimize: setting RAYON_NUM_THREADS={} based on {}",
+                "Auto-Optimize: selected {} scoped Rayon threads based on {}",
                 inm.rayon_threads,
                 profile
             );
+            return Some(inm.rayon_threads);
         }
     } else {
         log::warn!(
             "Auto-Optimize: system detection failed; continuing without rayon thread tuning"
         );
     }
+    None
+}
+
+fn resolve_rayon_threads(
+    options: &MatchOptionsDto,
+    algorithm: crate::matching::MatchingAlgorithm,
+) -> Option<usize> {
+    if let Some(threads) = options.rayon_threads {
+        return Some(threads as usize);
+    }
+    if options.auto_optimize {
+        return auto_optimize_rayon_threads(algorithm);
+    }
+    configured_rayon_threads_from_env()
+}
+
+fn configured_rayon_threads_from_env() -> Option<usize> {
+    std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .or_else(|| std::env::var("NAME_MATCHER_RAYON_THREADS").ok())
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|threads| *threads > 0)
 }
 
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {

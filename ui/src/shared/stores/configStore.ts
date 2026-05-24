@@ -69,8 +69,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
   setStreaming: (patch) =>
     set((s) => ({ streaming: { ...s.streaming, ...patch } })),
   setExport: (patch) => set((s) => ({ export: { ...s.export, ...patch } })),
-  setCascade: (patch) =>
-    set((s) => ({ cascade: { ...s.cascade, ...patch } })),
+  setCascade: (patch) => set((s) => ({ cascade: { ...s.cascade, ...patch } })),
   reset: () =>
     set({
       mode: "quick",

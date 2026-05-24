@@ -6,10 +6,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: "20"
+  PNPM_VERSION: "10"
+
 jobs:
   fmt:
     name: Rust fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -17,21 +23,100 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
-  check:
-    name: Rust check (CPU)
+  supply_chain:
+    name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --bins
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.19.7 --locked
+      - name: cargo deny (root)
+        run: cargo deny --manifest-path Cargo.toml check advisories bans licenses
+      - name: cargo deny (src-tauri)
+        run: cargo deny --manifest-path src-tauri/Cargo.toml check advisories bans licenses
+
+  clippy_root:
+    name: Clippy root default
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  clippy_gui:
+    name: Clippy root GUI
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked --features gui --all-targets -- -D warnings
+
+  clippy_tauri:
+    name: Clippy Tauri
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+
+  ui:
+    name: UI lint, format, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Install JS deps
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+      - name: TypeScript
+        working-directory: ui
+        run: pnpm lint
+      - name: ESLint
+        working-directory: ui
+        run: pnpm lint:eslint
+      - name: Prettier check
+        working-directory: ui
+        run: pnpm format:check
+      - name: Vitest
+        working-directory: ui
+        run: pnpm test
+
+  check:
+    name: Rust check (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --locked --bins
 
   build_gui_cpu_windows:
     name: Build GUI (CPU, Windows)
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --bin gui
+      - run: cargo build --release --locked --bin gui
       - uses: actions/upload-artifact@v4
         with:
           name: gui-windows-cpu
@@ -40,10 +125,11 @@ jobs:
   build_gui_cpu_linux:
     name: Build GUI (CPU, Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --bin gui
+      - run: cargo build --release --locked --bin gui
       - uses: actions/upload-artifact@v4
         with:
           name: gui-linux-cpu
@@ -52,12 +138,13 @@ jobs:
   build_gui_gpu_windows_self_hosted:
     name: Build GUI (GPU, self-hosted Windows)
     runs-on: [self-hosted, windows, cuda]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify nvcc
         run: nvcc --version
-      - run: cargo build --release --features gpu --bin gui
+      - run: cargo build --release --locked --features gpu --bin gui
       - uses: actions/upload-artifact@v4
         with:
           name: gui-windows-gpu

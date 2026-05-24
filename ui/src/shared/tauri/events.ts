@@ -1,9 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type {
-  JobStateEventDto,
-  LogEntryDto,
-  ProgressEventDto,
-} from "./types";
+import type { JobStateEventDto, LogEntryDto, ProgressEventDto } from "./types";
 
 export const EVENT_PROGRESS = "match-progress" as const;
 export const EVENT_STATE = "job-state" as const;

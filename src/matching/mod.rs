@@ -2604,8 +2604,7 @@ pub fn match_fuzzy_no_mid_cpu_gpu_equivalent<F>(
 where
     F: Fn(ProgressUpdate) + Sync,
 {
-    use chrono::Datelike;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     // Normalize
     let n1: Vec<NormalizedPerson> = t1.par_iter().map(normalize_person).collect();
     let n2: Vec<NormalizedPerson> = t2.par_iter().map(normalize_person).collect();
@@ -6172,8 +6171,7 @@ fn checkpoint_roundtrip() {
 use crate::db::{
     fetch_person_rows_chunk, fetch_person_rows_chunk_all_columns,
     fetch_person_rows_chunk_all_columns_keyset, fetch_person_rows_chunk_keyset,
-    fetch_person_rows_chunk_where, fetch_person_rows_chunk_where_keyset, get_max_id,
-    get_max_id_where, get_person_count,
+    fetch_person_rows_chunk_where_keyset, get_max_id, get_max_id_where, get_person_count,
 };
 use anyhow::Result;
 use sqlx::MySqlPool;
@@ -6659,6 +6657,7 @@ where
         gpu_free_mb: 0,
         gpu_active: false,
     });
+    #[cfg(feature = "gpu")]
     let mut _gpu_logged_once = false;
     loop {
         let rows = fetch_person_rows_chunk_keyset(
@@ -6689,7 +6688,10 @@ where
                 key_strs.push(s);
             }
         }
+        #[cfg(feature = "gpu")]
         let mut hashed: Option<Vec<u64>> = None;
+        #[cfg(not(feature = "gpu"))]
+        let hashed: Option<Vec<u64>> = None;
         #[cfg(feature = "gpu")]
         if cfg.use_gpu_build_hash {
             if let Some(ctx) = gpu_hash_ctx.as_ref() {
@@ -6955,7 +6957,10 @@ where
         let (probe_norms, probe_keys, probe_idx) =
             prepare_probe_batch(&rows, algo, cfg.parallel_normalize);
         // Compute probe hashes (GPU if enabled)
+        #[cfg(feature = "gpu")]
         let mut probe_hashes_opt: Option<Vec<u64>> = None;
+        #[cfg(not(feature = "gpu"))]
+        let probe_hashes_opt: Option<Vec<u64>> = None;
         #[cfg(feature = "gpu")]
         if cfg.use_gpu_probe_hash {
             if let Some(ctx) = gpu_hash_ctx.as_ref() {
@@ -7252,6 +7257,7 @@ where
         gpu_free_mb: 0,
         gpu_active: false,
     });
+    #[cfg(feature = "gpu")]
     let mut gpu_logged_once = false;
     loop {
         let rows = fetch_person_rows_chunk_keyset(
@@ -7282,7 +7288,10 @@ where
                 key_strs.push(s);
             }
         }
+        #[cfg(feature = "gpu")]
         let mut hashed: Option<Vec<u64>> = None;
+        #[cfg(not(feature = "gpu"))]
+        let hashed: Option<Vec<u64>> = None;
         #[cfg(feature = "gpu")]
         if cfg.use_gpu_build_hash {
             if let Some(ctx) = gpu_hash_ctx.as_ref() {
@@ -7542,7 +7551,10 @@ where
             prepare_probe_batch(&rows, algo, cfg.parallel_normalize);
 
         // Compute probe hashes (GPU if enabled)
+        #[cfg(feature = "gpu")]
         let mut probe_hashes_opt: Option<Vec<u64>> = None;
+        #[cfg(not(feature = "gpu"))]
+        let probe_hashes_opt: Option<Vec<u64>> = None;
         #[cfg(feature = "gpu")]
         if cfg.use_gpu_probe_hash {
             if let Some(ctx) = gpu_hash_ctx.as_ref() {
@@ -8063,9 +8075,6 @@ pub async fn stream_match_csv_dual<F>(
 where
     F: FnMut(&MatchPair) -> Result<()>,
 {
-    use crate::util::checkpoint::{
-        StreamCheckpoint, load_checkpoint, remove_checkpoint, save_checkpoint,
-    };
     if matches!(
         algo,
         MatchingAlgorithm::Fuzzy | MatchingAlgorithm::FuzzyNoMiddle
@@ -8731,7 +8740,7 @@ pub async fn stream_match_advanced<F>(
     table2: &str,
     cfg: &AdvConfig,
     scfg: StreamingConfig,
-    mut on_match: F,
+    on_match: F,
     on_progress: impl Fn(ProgressUpdate) + Sync,
     ctrl: Option<StreamControl>,
 ) -> Result<usize>
@@ -9186,8 +9195,8 @@ where
                 let mut pending_comps: usize = 0;
 
                 // Helper to flush a batched set of groups via GPU (with strict parity filters)
-                let mut flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
-                                             pending_comps: &mut usize|
+                let flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
+                                         pending_comps: &mut usize|
                  -> anyhow::Result<Vec<MatchPair>> {
                     if pending.is_empty() {
                         return Ok(Vec::new());
@@ -9536,7 +9545,7 @@ where
                                 _ => None,
                             };
                             if let Some((score, _label)) = result {
-                                let mut pair = MatchPair {
+                                let pair = MatchPair {
                                     person1: a.clone(),
                                     person2: b.clone(),
                                     confidence: score as f32, // 0..100
@@ -9680,7 +9689,7 @@ where
                                                 _ => None,
                                             };
                                             if let Some((score, _label)) = result {
-                                                let mut pair = MatchPair {
+                                                let pair = MatchPair {
                                                     person1: a.clone(),
                                                     person2: b.clone(),
                                                     confidence: score as f32,
@@ -9830,7 +9839,7 @@ pub async fn stream_match_advanced_dual<F>(
     table2: &str,
     cfg: &AdvConfig,
     scfg: StreamingConfig,
-    mut on_match: F,
+    on_match: F,
     on_progress: impl Fn(ProgressUpdate) + Sync,
     ctrl: Option<StreamControl>,
 ) -> Result<usize>
@@ -10236,8 +10245,8 @@ where
                 let mut pending_small: Vec<(Vec<Person>, Vec<Person>)> = Vec::new();
                 let mut pending_comps: usize = 0;
 
-                let mut flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
-                                             pending_comps: &mut usize|
+                let flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
+                                         pending_comps: &mut usize|
                  -> anyhow::Result<Vec<MatchPair>> {
                     if pending.is_empty() {
                         return Ok(Vec::new());
@@ -10446,7 +10455,7 @@ where
                                 _ => None,
                             };
                             if let Some((score, _label)) = result {
-                                let mut pair = MatchPair {
+                                let pair = MatchPair {
                                     person1: a.clone(),
                                     person2: b.clone(),
                                     confidence: score as f32, // 0..100
@@ -10577,7 +10586,7 @@ where
                                                 compare_persons_no_mid(a, b)
                                             };
                                             if let Some((score, _label)) = result {
-                                                let mut pair = MatchPair {
+                                                let pair = MatchPair {
                                                     person1: a.clone(),
                                                     person2: b.clone(),
                                                     confidence: score as f32,
@@ -10933,8 +10942,8 @@ where
         let mut pending_small: Vec<(Vec<Person>, Vec<Person>)> = Vec::new();
         let mut pending_comps: usize = 0;
 
-        let mut flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
-                                     pending_comps: &mut usize|
+        let flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
+                                 pending_comps: &mut usize|
          -> anyhow::Result<Vec<MatchPair>> {
             if pending.is_empty() {
                 return Ok(Vec::new());
@@ -11388,8 +11397,8 @@ where
         let mut pending_small: Vec<(Vec<Person>, Vec<Person>)> = Vec::new();
         let mut pending_comps: usize = 0;
 
-        let mut flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
-                                     pending_comps: &mut usize|
+        let flush_pending_gpu = |pending: &mut Vec<(Vec<Person>, Vec<Person>)>,
+                                 pending_comps: &mut usize|
          -> anyhow::Result<Vec<MatchPair>> {
             if pending.is_empty() {
                 return Ok(Vec::new());

@@ -49,7 +49,10 @@ const ExportOptionsSchema = z.object({
   file_stem: z
     .string()
     .min(1, "File stem is required")
-    .regex(/^[A-Za-z0-9._-]+$/, "Use letters, digits, dot, underscore, or hyphen"),
+    .regex(
+      /^[A-Za-z0-9._-]+$/,
+      "Use letters, digits, dot, underscore, or hyphen",
+    ),
   min_confidence: z.number().min(0).max(100).nullable().optional(),
   include_extra_fields: z.boolean(),
 });
@@ -60,7 +63,13 @@ const MatchOptionsSchema = z.object({
   ultra_performance: z.boolean(),
   rayon_threads: z.number().int().min(1).max(256).nullable().optional(),
   pool_size: z.number().int().min(1).max(256).nullable().optional(),
-  memory_threshold_mb: z.number().int().min(256).max(262_144).nullable().optional(),
+  memory_threshold_mb: z
+    .number()
+    .int()
+    .min(256)
+    .max(262_144)
+    .nullable()
+    .optional(),
 });
 
 const CascadeSchema = z
@@ -149,9 +158,9 @@ export const RunConfigSchema = z
 export type RunConfigInput = z.input<typeof RunConfigSchema>;
 export type RunConfigParsed = z.output<typeof RunConfigSchema>;
 
-export function parseRunConfig(value: unknown):
-  | { ok: true; value: RunConfigDto }
-  | { ok: false; issues: string[] } {
+export function parseRunConfig(
+  value: unknown,
+): { ok: true; value: RunConfigDto } | { ok: false; issues: string[] } {
   const r = RunConfigSchema.safeParse(value);
   if (r.success) return { ok: true, value: r.data as RunConfigDto };
   return {

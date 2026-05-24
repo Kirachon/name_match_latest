@@ -93,10 +93,9 @@ pub mod summary;
 use anyhow::{Result, bail};
 use log::{info, warn};
 
-use crate::cli::args;
 use crate::cli::flags::CliFlags;
 use crate::config::DatabaseConfig;
-use crate::db::{discover_table_columns, get_person_count, make_pool};
+use crate::db::{discover_table_columns, get_person_count};
 use crate::matching::MatchingAlgorithm;
 
 /// Configuration for a matching run, parsed from CLI and environment.
@@ -205,11 +204,12 @@ pub fn apply_auto_optimize(algorithm: MatchingAlgorithm) {
     if let Ok(profile) = crate::optimization::SystemProfile::detect() {
         let inm = crate::optimization::calculate_inmemory_config(&profile, algorithm, false);
         if inm.rayon_threads > 0 {
-            unsafe {
-                std::env::set_var("RAYON_NUM_THREADS", inm.rayon_threads.to_string());
-            }
+            let _ = rayon::ThreadPoolBuilder::new()
+                .num_threads(inm.rayon_threads)
+                .thread_name(|i| format!("nm-auto-rayon-{i}"))
+                .build_global();
             info!(
-                "Auto-Optimize: setting RAYON_NUM_THREADS={} based on {}",
+                "Auto-Optimize: selected {} global Rayon threads based on {}",
                 inm.rayon_threads, profile
             );
         }

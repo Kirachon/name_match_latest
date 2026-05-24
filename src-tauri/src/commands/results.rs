@@ -44,8 +44,19 @@ pub fn export_results(
     let dir = std::path::Path::new(&request.output_directory);
     let mut written = Vec::new();
     let min = request.min_confidence.unwrap_or(0.0);
-    let rows: Vec<&name_matcher::run_service::dto::MatchPairDto> =
-        snap.rows.iter().filter(|r| r.confidence >= min).collect();
+    validate_levels(&request.levels)?;
+    let selected_levels: BTreeSet<u8> = request.levels.iter().copied().collect();
+    let rows: Vec<&name_matcher::run_service::dto::MatchPairDto> = snap
+        .rows
+        .iter()
+        .filter(|r| r.confidence >= min)
+        .filter(|r| {
+            selected_levels.is_empty()
+                || r.matched_at_level
+                    .map(|level| selected_levels.contains(&level))
+                    .unwrap_or(false)
+        })
+        .collect();
     let row_count = rows.len() as u64;
     let is_cascade = rows.iter().any(|r| r.matched_at_level.is_some());
 
@@ -114,6 +125,15 @@ fn validate_file_stem(stem: &str) -> AppResult<()> {
             "file_stem may only contain letters, numbers, dot, dash, and underscore".into(),
         ))
     }
+}
+
+fn validate_levels(levels: &[u8]) -> AppResult<()> {
+    if let Some(level) = levels.iter().copied().find(|level| !(1..=11).contains(level)) {
+        return Err(AppError::Validation(format!(
+            "level must be between 1 and 11: {level}"
+        )));
+    }
+    Ok(())
 }
 
 fn write_csv(

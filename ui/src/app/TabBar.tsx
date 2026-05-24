@@ -32,13 +32,15 @@ export function TabBar({
   const configReady = exportDir.trim().length > 0;
   const runHasJob = activeJobId != null;
   const resultsReady =
-    jobState === "completed" || jobState === "failed" || jobState === "cancelled";
+    jobState === "completed" ||
+    jobState === "failed" ||
+    jobState === "cancelled";
 
   const lockReason: Record<TabId, string | null> = {
     connect: null,
-    configure: conn.ready ? null : conn.reason ?? "Connect databases first",
+    configure: conn.ready ? null : (conn.reason ?? "Connect databases first"),
     run: !conn.ready
-      ? conn.reason ?? "Connect databases first"
+      ? (conn.reason ?? "Connect databases first")
       : !configReady
         ? "Pick an output directory first"
         : null,

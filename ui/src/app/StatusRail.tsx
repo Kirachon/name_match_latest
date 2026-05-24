@@ -2,7 +2,11 @@ import { useConnectionStore } from "@/shared/stores/connectionStore";
 import { useConfigStore } from "@/shared/stores/configStore";
 import { useJobStore, useProgressStore } from "@/shared/stores/jobStore";
 import { Pill, StatusDot } from "@/shared/components/primitives";
-import { algorithmMeta, type SystemInfoDto, type JobStateDto } from "@/shared/tauri/types";
+import {
+  algorithmMeta,
+  type SystemInfoDto,
+  type JobStateDto,
+} from "@/shared/tauri/types";
 import { cx, formatNumber } from "@/shared/lib/format";
 
 export function StatusRail({ system }: { system: SystemInfoDto | null }) {
@@ -76,13 +80,15 @@ export function StatusRail({ system }: { system: SystemInfoDto | null }) {
       />
       <RailItem
         label="GPU"
-        tone={gpuMode === "cpu" ? "mute" : system?.gpu_available ? "ok" : "warn"}
+        tone={
+          gpuMode === "cpu" ? "mute" : system?.gpu_available ? "ok" : "warn"
+        }
         primary={
           gpuMode === "cpu" ? "CPU" : gpuMode === "auto" ? "Auto" : "Force GPU"
         }
         secondary={
           system?.gpu_available
-            ? system.gpu_devices[0] ?? "GPU available"
+            ? (system.gpu_devices[0] ?? "GPU available")
             : gpuMode === "cpu"
               ? "Disabled by config"
               : "No CUDA detected"

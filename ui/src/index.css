@@ -227,17 +227,22 @@
 
   /* --- Dotted-grid background for the empty-state cards --- */
   .dot-grid {
-    background-image: radial-gradient(rgba(148, 163, 184, 0.16) 1px, transparent 1px);
+    background-image: radial-gradient(
+      rgba(148, 163, 184, 0.16) 1px,
+      transparent 1px
+    );
     background-size: 14px 14px;
   }
 }
 
 /* Subtle rail gradient — gives a sense of depth without distracting. */
 .rail-gradient {
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(11, 15, 23, 0.92));
+  background: linear-gradient(
+    180deg,
+    rgba(15, 23, 42, 0.95),
+    rgba(11, 15, 23, 0.92)
+  );
 }
-
-
 
 /* kbd shortcut hint */
 .kbd {

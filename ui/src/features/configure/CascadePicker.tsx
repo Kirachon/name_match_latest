@@ -46,7 +46,9 @@ export function CascadePicker() {
       return;
     }
     // Filter preset levels to those that are runnable on these tables.
-    const allowed = def.levels.filter((id) => isLevelRunnable(id, hasBarangay, hasCity));
+    const allowed = def.levels.filter((id) =>
+      isLevelRunnable(id, hasBarangay, hasCity),
+    );
     setCascade({ preset, levels: allowed });
   }
 

@@ -22,6 +22,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-store = "2"
+tauri-plugin-window-state = "2.4.1"
 
 # JSON / async runtime / error wiring.
 serde = { version = "1.0.225", features = ["derive"] }

@@ -140,24 +140,109 @@ export interface CascadeLevelMeta {
 }
 
 export const CASCADE_LEVELS: CascadeLevelMeta[] = [
-  { id: 1, label: "L1 — Birthdate + Full Middle", description: "Exact match on first/middle/last + birthdate.", group: "name", requiresColumn: null },
-  { id: 2, label: "L2 — Birthdate + Middle Initial", description: "Same as L1 but matches on middle-name initial only.", group: "name", requiresColumn: null },
-  { id: 3, label: "L3 — Birthdate + No Middle", description: "Exact match on first/last + birthdate; ignores middle name.", group: "name", requiresColumn: null },
-  { id: 4, label: "L4 — Barangay + Full Middle", description: "Adds barangay_code grouping to L1.", group: "barangay", requiresColumn: "barangay_code" },
-  { id: 5, label: "L5 — Barangay + Middle Initial", description: "Adds barangay_code grouping to L2.", group: "barangay", requiresColumn: "barangay_code" },
-  { id: 6, label: "L6 — Barangay + No Middle", description: "Adds barangay_code grouping to L3.", group: "barangay", requiresColumn: "barangay_code" },
-  { id: 7, label: "L7 — City + Full Middle", description: "Adds city_code grouping to L1.", group: "city", requiresColumn: "city_code" },
-  { id: 8, label: "L8 — City + Middle Initial", description: "Adds city_code grouping to L2.", group: "city", requiresColumn: "city_code" },
-  { id: 9, label: "L9 — City + No Middle", description: "Adds city_code grouping to L3.", group: "city", requiresColumn: "city_code" },
-  { id: 10, label: "L10 — Fuzzy (with middle)", description: "Jaro-Winkler / Levenshtein fuzzy with middle name.", group: "fuzzy", requiresColumn: null },
-  { id: 11, label: "L11 — Fuzzy (no middle)", description: "Jaro-Winkler / Levenshtein fuzzy without middle name.", group: "fuzzy", requiresColumn: null },
+  {
+    id: 1,
+    label: "L1 — Birthdate + Full Middle",
+    description: "Exact match on first/middle/last + birthdate.",
+    group: "name",
+    requiresColumn: null,
+  },
+  {
+    id: 2,
+    label: "L2 — Birthdate + Middle Initial",
+    description: "Same as L1 but matches on middle-name initial only.",
+    group: "name",
+    requiresColumn: null,
+  },
+  {
+    id: 3,
+    label: "L3 — Birthdate + No Middle",
+    description: "Exact match on first/last + birthdate; ignores middle name.",
+    group: "name",
+    requiresColumn: null,
+  },
+  {
+    id: 4,
+    label: "L4 — Barangay + Full Middle",
+    description: "Adds barangay_code grouping to L1.",
+    group: "barangay",
+    requiresColumn: "barangay_code",
+  },
+  {
+    id: 5,
+    label: "L5 — Barangay + Middle Initial",
+    description: "Adds barangay_code grouping to L2.",
+    group: "barangay",
+    requiresColumn: "barangay_code",
+  },
+  {
+    id: 6,
+    label: "L6 — Barangay + No Middle",
+    description: "Adds barangay_code grouping to L3.",
+    group: "barangay",
+    requiresColumn: "barangay_code",
+  },
+  {
+    id: 7,
+    label: "L7 — City + Full Middle",
+    description: "Adds city_code grouping to L1.",
+    group: "city",
+    requiresColumn: "city_code",
+  },
+  {
+    id: 8,
+    label: "L8 — City + Middle Initial",
+    description: "Adds city_code grouping to L2.",
+    group: "city",
+    requiresColumn: "city_code",
+  },
+  {
+    id: 9,
+    label: "L9 — City + No Middle",
+    description: "Adds city_code grouping to L3.",
+    group: "city",
+    requiresColumn: "city_code",
+  },
+  {
+    id: 10,
+    label: "L10 — Fuzzy (with middle)",
+    description: "Jaro-Winkler / Levenshtein fuzzy with middle name.",
+    group: "fuzzy",
+    requiresColumn: null,
+  },
+  {
+    id: 11,
+    label: "L11 — Fuzzy (no middle)",
+    description: "Jaro-Winkler / Levenshtein fuzzy without middle name.",
+    group: "fuzzy",
+    requiresColumn: null,
+  },
 ];
 
-export const CASCADE_PRESETS: Record<CascadePresetId, { label: string; levels: number[]; description: string }> = {
-  standard: { label: "Standard", levels: [1, 2, 3, 10, 11], description: "Name-only matching. L1–L3 exact + L10–L11 fuzzy." },
-  extended: { label: "Extended", levels: [1, 2, 3, 4, 5, 6, 10, 11], description: "Adds barangay_code grouping to Standard." },
-  full: { label: "Full", levels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], description: "Every available level, L1–L11." },
-  custom: { label: "Custom", levels: [], description: "Pick exactly which levels to run." },
+export const CASCADE_PRESETS: Record<
+  CascadePresetId,
+  { label: string; levels: number[]; description: string }
+> = {
+  standard: {
+    label: "Standard",
+    levels: [1, 2, 3, 10, 11],
+    description: "Name-only matching. L1–L3 exact + L10–L11 fuzzy.",
+  },
+  extended: {
+    label: "Extended",
+    levels: [1, 2, 3, 4, 5, 6, 10, 11],
+    description: "Adds barangay_code grouping to Standard.",
+  },
+  full: {
+    label: "Full",
+    levels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    description: "Every available level, L1–L11.",
+  },
+  custom: {
+    label: "Custom",
+    levels: [],
+    description: "Pick exactly which levels to run.",
+  },
 };
 
 export function autoSelectCascadePreset(opts: {
@@ -293,6 +378,7 @@ export interface ResultPageRequestDto {
   query?: string | null;
   sort_by?: string | null;
   sort_dir?: string | null;
+  levels?: number[];
 }
 
 export interface ResultPageDto {
@@ -300,6 +386,8 @@ export interface ResultPageDto {
   page: number;
   limit: number;
   total: number;
+  available_levels: number[];
+  level_counts: Record<string, number>;
   rows: MatchPairDto[];
 }
 
@@ -321,6 +409,7 @@ export interface ExportRequestDto {
   output_directory: string;
   file_stem: string;
   min_confidence?: number | null;
+  levels?: number[];
   include_extra_fields?: boolean;
 }
 
@@ -437,7 +526,13 @@ export const ALGORITHMS: AlgorithmMeta[] = [
     label: "Household — uuid → hh_id",
     description:
       "Aggregated household matching from Table 1 → Table 2. Requires hh_id on the target table.",
-    requiresColumns: ["has_id", "has_uuid", "has_first_name", "has_last_name", "has_birthdate"],
+    requiresColumns: [
+      "has_id",
+      "has_uuid",
+      "has_first_name",
+      "has_last_name",
+      "has_birthdate",
+    ],
     gpuApplicable: true,
     fuzzyTuneable: true,
   },
@@ -447,7 +542,13 @@ export const ALGORITHMS: AlgorithmMeta[] = [
     label: "Household — hh_id → uuid (role-swapped)",
     description:
       "Role-swapped household aggregation. Denominator switches to Table 2 size for completeness scoring.",
-    requiresColumns: ["has_id", "has_uuid", "has_first_name", "has_last_name", "has_birthdate"],
+    requiresColumns: [
+      "has_id",
+      "has_uuid",
+      "has_first_name",
+      "has_last_name",
+      "has_birthdate",
+    ],
     gpuApplicable: true,
     fuzzyTuneable: true,
   },

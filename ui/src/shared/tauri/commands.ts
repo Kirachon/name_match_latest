@@ -21,7 +21,10 @@ import type {
  * we re-throw it as a typed JS object so the UI can render the right
  * error UX (toast vs modal vs inline).
  */
-async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function call<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   try {
     return (await invoke(cmd, args)) as T;
   } catch (raw) {
@@ -50,6 +53,8 @@ export const saveConfig = (config: Record<string, unknown>) =>
 
 export const connectDb = (creds: DbCredentialsDto) =>
   call<DbSessionDto>("connect_db", { creds });
+export const validateDbCredentials = (creds: DbCredentialsDto) =>
+  call<number>("validate_db_credentials", { creds });
 export const testConnection = (sessionId: string) =>
   call<number>("test_connection", { sessionId });
 export const listTables = (sessionId: string) =>
@@ -76,6 +81,8 @@ export const getMatchingStatus = (jobId: string) =>
   call<JobSummaryDto>("get_matching_status", { jobId });
 export const listMatchingJobs = () =>
   call<JobSummaryDto[]>("list_matching_jobs");
+export const forgetMatchingJob = (jobId: string) =>
+  call<void>("forget_matching_job", { jobId });
 
 // ---------- Results / export ----------
 

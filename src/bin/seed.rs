@@ -461,6 +461,7 @@ async fn seed_households(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn seed_table(pool: &Pool<MySql>, table: &str, rows: usize, seed: u64) -> Result<()> {
     println!("Seeding {table} with {rows} rows...");
 

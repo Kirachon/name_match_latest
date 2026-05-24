@@ -155,5 +155,30 @@ pub fn get_matching_status(
 
 #[tauri::command]
 pub fn list_matching_jobs(state: State<'_, Arc<AppState>>) -> Vec<JobSummaryDto> {
+    state.jobs.prune_terminal();
     state.results.list_summaries()
+}
+
+#[tauri::command]
+pub fn forget_matching_job(job_id: String, state: State<'_, Arc<AppState>>) -> AppResult<()> {
+    if let Some(handle) = state.jobs.get(&job_id) {
+        let live_state = handle.state();
+        if live_state.is_active() {
+            return Err(AppError::Validation(format!(
+                "cannot forget active job: {job_id}"
+            )));
+        }
+    }
+
+    state
+        .results
+        .forget_job(&job_id)
+        .map_err(|e| AppError::Validation(e.to_string()))?
+        .ok_or_else(|| AppError::Validation(format!("unknown job_id: {job_id}")))?;
+
+    if let Some(handle) = state.jobs.remove(&job_id) {
+        handle.join();
+    }
+
+    Ok(())
 }

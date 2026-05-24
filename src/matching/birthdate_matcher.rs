@@ -1,15 +1,33 @@
 use chrono::{Datelike, NaiveDate};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const SWAP_ENV: &str = "NAME_MATCHER_ALLOW_BIRTHDATE_SWAP";
+const OVERRIDE_UNSET: u8 = 2;
+
+static SWAP_OVERRIDE: AtomicU8 = AtomicU8::new(OVERRIDE_UNSET);
 
 /// Read once from the environment to decide if birthdate month/day swapping is allowed.
 /// Accepted truthy values: 1, true, yes, on (case-insensitive). Defaults to false.
 pub fn allow_birthdate_swap() -> bool {
+    match SWAP_OVERRIDE.load(Ordering::Relaxed) {
+        0 => return false,
+        1 => return true,
+        _ => {}
+    }
     std::env::var(SWAP_ENV)
         .ok()
         .map(|v| v.trim().to_ascii_lowercase())
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+pub fn set_allow_birthdate_swap(allow: bool) {
+    SWAP_OVERRIDE.store(u8::from(allow), Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub fn clear_allow_birthdate_swap_override() {
+    SWAP_OVERRIDE.store(OVERRIDE_UNSET, Ordering::Relaxed);
 }
 
 /// Strictly parse a `YYYY-MM-DD` string. Returns `None` on invalid format or date.

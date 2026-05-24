@@ -24,8 +24,6 @@
     "shell:default",
     "shell:allow-open",
     "store:default",
-    {
-      "identifier": "core:webview:allow-internal-toggle-devtools"
-    }
+    "window-state:default"
   ]
 }

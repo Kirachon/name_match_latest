@@ -11,7 +11,10 @@ import {
   useProgressStore,
 } from "@/shared/stores/jobStore";
 import { useConfigStore } from "@/shared/stores/configStore";
-import { useConnectionStore, readinessForRun } from "@/shared/stores/connectionStore";
+import {
+  useConnectionStore,
+  readinessForRun,
+} from "@/shared/stores/connectionStore";
 import { useToastStore } from "@/shared/stores/toastStore";
 import {
   Button,
@@ -28,7 +31,11 @@ import {
   formatPercent,
   formatTimestamp,
 } from "@/shared/lib/format";
-import type { JobStateDto, LogEntryDto, PipelineStageDto } from "@/shared/tauri/types";
+import type {
+  JobStateDto,
+  LogEntryDto,
+  PipelineStageDto,
+} from "@/shared/tauri/types";
 
 const STAGES: Array<{ id: PipelineStageDto; label: string }> = [
   { id: "load", label: "Load" },
@@ -173,7 +180,9 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
   const isResuming = jobState === "resuming";
   const isActive = isRunning || isPausing || isPaused || isResuming;
   const isTerminal =
-    jobState === "completed" || jobState === "failed" || jobState === "cancelled";
+    jobState === "completed" ||
+    jobState === "failed" ||
+    jobState === "cancelled";
 
   // Expose pause/resume to the global Ctrl+P shortcut handler via a stable
   // ref on `window` (set once per render). Cheap and avoids a context.
@@ -275,7 +284,8 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
                   {formatPercent(progress.percent || 0)}
                 </span>
                 <span className="text-sm text-ink-400 tabular">
-                  {formatNumber(progress.processed)} / {formatNumber(progress.total || 0)}
+                  {formatNumber(progress.processed)} /{" "}
+                  {formatNumber(progress.total || 0)}
                 </span>
                 {isPaused && (
                   <span className="text-xs text-warn-400 uppercase tracking-wider ml-2">
@@ -293,7 +303,9 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
                   ETA
                 </div>
                 <div className="text-sm tabular text-ink-100">
-                  {progress.etaSecs > 0 ? formatDuration(progress.etaSecs) : "—"}
+                  {progress.etaSecs > 0
+                    ? formatDuration(progress.etaSecs)
+                    : "—"}
                 </div>
               </div>
             </div>
@@ -351,9 +363,7 @@ function PipelineRow({
             data-done={isDone ? "true" : "false"}
           >
             <StatusDot
-              tone={
-                isActive ? "info" : isDone ? "ok" : "mute"
-              }
+              tone={isActive ? "info" : isDone ? "ok" : "mute"}
               pulse={isActive && state !== "idle"}
             />
             {s.label}
@@ -371,7 +381,10 @@ function MetricsCard() {
       <SectionHeader title="Metrics" />
       <div className="grid grid-cols-2 gap-3 text-sm">
         <Stat label="Matches" value={formatNumber(p.matchesFound)} />
-        <Stat label="Records / sec" value={formatNumber(Math.round(p.recordsPerSec))} />
+        <Stat
+          label="Records / sec"
+          value={formatNumber(Math.round(p.recordsPerSec))}
+        />
         <Stat label="Memory used" value={`${formatNumber(p.memUsedMb)} MB`} />
         <Stat label="Memory free" value={`${formatNumber(p.memAvailMb)} MB`} />
       </div>
@@ -388,13 +401,20 @@ function GpuCard() {
         title="GPU"
         action={
           <Pill tone={tone}>
-            <StatusDot tone={tone} pulse={p.gpuActive} /> {p.gpuActive ? "Active" : "Idle"}
+            <StatusDot tone={tone} pulse={p.gpuActive} />{" "}
+            {p.gpuActive ? "Active" : "Idle"}
           </Pill>
         }
       />
       <div className="grid grid-cols-2 gap-3 text-sm">
-        <Stat label="VRAM total" value={p.gpuTotalMb ? `${formatNumber(p.gpuTotalMb)} MB` : "—"} />
-        <Stat label="VRAM free" value={p.gpuFreeMb ? `${formatNumber(p.gpuFreeMb)} MB` : "—"} />
+        <Stat
+          label="VRAM total"
+          value={p.gpuTotalMb ? `${formatNumber(p.gpuTotalMb)} MB` : "—"}
+        />
+        <Stat
+          label="VRAM free"
+          value={p.gpuFreeMb ? `${formatNumber(p.gpuFreeMb)} MB` : "—"}
+        />
       </div>
     </Card>
   );
@@ -403,7 +423,9 @@ function GpuCard() {
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="surface-soft px-3 py-2">
-      <div className="text-2xs uppercase tracking-wider text-ink-500">{label}</div>
+      <div className="text-2xs uppercase tracking-wider text-ink-500">
+        {label}
+      </div>
       <div className="text-base text-ink-50 tabular mt-0.5">{value}</div>
     </div>
   );
@@ -418,8 +440,7 @@ function LogConsole() {
     const el = containerRef.current;
     if (!el) return;
     // Auto-scroll only if user is near the bottom.
-    const nearBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
     if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [entries.length]);
 
@@ -428,8 +449,16 @@ function LogConsole() {
   return (
     <Card padded={false}>
       <div className="flex items-center justify-between p-4 pb-2">
-        <SectionHeader title="Run log" description="Capped to the latest 5,000 entries; oldest are dropped." />
-        <Button tone="ghost" size="sm" onClick={clear} disabled={entries.length === 0}>
+        <SectionHeader
+          title="Run log"
+          description="Capped to the latest 5,000 entries; oldest are dropped."
+        />
+        <Button
+          tone="ghost"
+          size="sm"
+          onClick={clear}
+          disabled={entries.length === 0}
+        >
           Clear
         </Button>
       </div>
@@ -472,8 +501,6 @@ function LogLine({ e }: { e: LogEntryDto }) {
     </div>
   );
 }
-
-
 
 function PauseIcon() {
   return (

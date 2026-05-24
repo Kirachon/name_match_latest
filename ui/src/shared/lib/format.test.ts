@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatDuration, formatNumber, formatPercent } from "./format";
+import {
+  formatBytes,
+  formatDuration,
+  formatNumber,
+  formatPercent,
+} from "./format";
 
 describe("format helpers", () => {
   it("formats missing and invalid numbers as an em dash", () => {

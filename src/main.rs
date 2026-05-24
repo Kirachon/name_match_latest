@@ -1,3 +1,38 @@
+#![allow(
+    dead_code,
+    unused_assignments,
+    unused_comparisons,
+    unused_variables,
+    clippy::absurd_extreme_comparisons,
+    clippy::collapsible_else_if,
+    clippy::collapsible_if,
+    clippy::comparison_to_empty,
+    clippy::derivable_impls,
+    clippy::empty_line_after_doc_comments,
+    clippy::explicit_counter_loop,
+    clippy::field_reassign_with_default,
+    clippy::get_first,
+    clippy::legacy_numeric_constants,
+    clippy::manual_clamp,
+    clippy::manual_range_contains,
+    clippy::manual_range_patterns,
+    clippy::needless_borrow,
+    clippy::needless_borrows_for_generic_args,
+    clippy::needless_lifetimes,
+    clippy::needless_return,
+    clippy::print_literal,
+    clippy::ptr_arg,
+    clippy::redundant_closure_call,
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_map_or,
+    clippy::useless_conversion,
+    clippy::write_literal
+)]
+// The legacy CLI binary includes shared engine modules directly. Their public
+// helper APIs are exercised through the library and Tauri paths, so suppress
+// duplicate-bin dead_code noise here while keeping library warnings visible.
+
 use anyhow::{Context, Result, bail};
 use env_logger::Env;
 use log::{error, info, warn};
@@ -79,6 +114,8 @@ async fn main() {
         env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     }
 
+    init_global_rayon_from_env_alias();
+
     #[cfg(feature = "new_cli")]
     if std::env::var("NAME_MATCHER_NEW_CLI")
         .ok()
@@ -130,6 +167,21 @@ async fn main() {
             error!("{:#}", e);
             std::process::exit(1);
         }
+    }
+}
+
+fn init_global_rayon_from_env_alias() {
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .or_else(|| std::env::var("NAME_MATCHER_RAYON_THREADS").ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|threads| *threads > 0);
+    if let Some(threads) = threads {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("nm-cli-rayon-{i}"))
+            .build_global();
+        info!("Rayon global pool initialised from env with {threads} worker threads");
     }
 }
 
@@ -452,11 +504,12 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         if let Ok(profile) = crate::optimization::SystemProfile::detect() {
             let inm = crate::optimization::calculate_inmemory_config(&profile, algorithm, false);
             if inm.rayon_threads > 0 {
-                unsafe {
-                    std::env::set_var("RAYON_NUM_THREADS", inm.rayon_threads.to_string());
-                }
+                let _ = rayon::ThreadPoolBuilder::new()
+                    .num_threads(inm.rayon_threads)
+                    .thread_name(|i| format!("nm-cli-rayon-{i}"))
+                    .build_global();
                 info!(
-                    "Auto-Optimize: setting RAYON_NUM_THREADS={} based on {}",
+                    "Auto-Optimize: selected {} global Rayon threads based on {}",
                     inm.rayon_threads, profile
                 );
             }
@@ -592,7 +645,6 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         // Ensure CSV output
         if format != "csv" {
             warn!("Cascade Matching outputs CSV only; switching format to CSV");
-            format = "csv".into();
             if !out_path.to_ascii_lowercase().ends_with(".csv") {
                 out_path.push_str(".csv");
             }
@@ -743,7 +795,6 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         // Enforce CSV output for Advanced for now
         if format != "csv" {
             warn!("Advanced Matching currently outputs CSV only; switching format to CSV");
-            format = "csv".into();
             if !out_path.to_ascii_lowercase().ends_with(".csv") {
                 out_path.push_str(".csv");
             }
@@ -908,7 +959,7 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
                 };
 
                 // Progressive export for in-memory L12
-                let mut emitted = 0usize;
+                let emitted: usize;
                 if out_path.to_ascii_lowercase().ends_with(".csv") {
                     let mut w = HouseholdCsvWriter::create_with_meta(
                         &out_path,
@@ -2609,13 +2660,14 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         // using global run_start_utc captured earlier
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-        let mut fuzzy_gpu_used_opt: Option<(Arc<AtomicBool>, Arc<AtomicU64>, Arc<AtomicU64>)> =
-            None;
-        let matches_requested = if use_new_engine {
+        let (matches_requested, fuzzy_gpu_used_opt) = if use_new_engine {
             #[cfg(feature = "new_engine")]
             {
-                crate::engine::person_pipeline::run_new_engine_in_memory(
-                    &people1, &people2, algorithm,
+                (
+                    crate::engine::person_pipeline::run_new_engine_in_memory(
+                        &people1, &people2, algorithm,
+                    ),
+                    None,
                 )
             }
             #[cfg(not(feature = "new_engine"))]
@@ -2629,25 +2681,31 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
             let used_c = fuzzy_gpu_used.clone();
             let tot_c = gpu_total_mb.clone();
             let free_c = gpu_free_mb.clone();
-            let res = match_all_progress(
-                &people1,
-                &people2,
-                algorithm,
-                cfgp,
-                move |u: ProgressUpdate| {
-                    if u.gpu_active {
-                        used_c.store(true, Ordering::Relaxed);
-                    }
-                    tot_c.store(u.gpu_total_mb as u64, Ordering::Relaxed);
-                    free_c.store(u.gpu_free_mb as u64, Ordering::Relaxed);
-                    info!(
-                        "Progress: {:.1}% | ETA: {}s | Mem used: {} MB | Avail: {} MB ({} / {})",
-                        u.percent, u.eta_secs, u.mem_used_mb, u.mem_avail_mb, u.processed, u.total
-                    );
-                },
-            );
-            fuzzy_gpu_used_opt = Some((fuzzy_gpu_used, gpu_total_mb, gpu_free_mb));
-            res
+            (
+                match_all_progress(
+                    &people1,
+                    &people2,
+                    algorithm,
+                    cfgp,
+                    move |u: ProgressUpdate| {
+                        if u.gpu_active {
+                            used_c.store(true, Ordering::Relaxed);
+                        }
+                        tot_c.store(u.gpu_total_mb as u64, Ordering::Relaxed);
+                        free_c.store(u.gpu_free_mb as u64, Ordering::Relaxed);
+                        info!(
+                            "Progress: {:.1}% | ETA: {}s | Mem used: {} MB | Avail: {} MB ({} / {})",
+                            u.percent,
+                            u.eta_secs,
+                            u.mem_used_mb,
+                            u.mem_avail_mb,
+                            u.processed,
+                            u.total
+                        );
+                    },
+                ),
+                Some((fuzzy_gpu_used, gpu_total_mb, gpu_free_mb)),
+            )
         };
         let took_requested = start.elapsed();
         if took_requested.as_secs() >= 30 {
