@@ -1,18 +1,25 @@
 import { cx, formatPercent } from "@/shared/lib/format";
-import type { MatchPairDto } from "@/shared/tauri/types";
+import type { MatchPairDto, ReviewDecisionValue } from "@/shared/tauri/types";
+import { ReviewActions } from "./ReviewActions";
 
 export function MatchRow({
   row,
   top,
   height,
   selected,
+  decision,
+  decisionSaving,
   onSelect,
+  onDecision,
 }: {
   row: MatchPairDto;
   top: number;
   height: number;
   selected: boolean;
+  decision?: ReviewDecisionValue;
+  decisionSaving: boolean;
   onSelect: () => void;
+  onDecision: (decision: ReviewDecisionValue) => void;
 }) {
   return (
     <div
@@ -79,6 +86,17 @@ export function MatchRow({
         title={row.matched_fields.join(", ")}
       >
         {row.matched_fields.join(", ")}
+      </div>
+      <div
+        role="cell"
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        <ReviewActions
+          decision={decision}
+          disabled={decisionSaving}
+          onDecision={onDecision}
+        />
       </div>
     </div>
   );

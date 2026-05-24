@@ -5,8 +5,10 @@ import {
   explainPair,
   exportResults,
   forgetMatchingJob,
+  getDecisions,
   getMatchingStatus,
   getResultsPage,
+  saveDecision,
 } from "@/shared/tauri/commands";
 import { useJobStore } from "@/shared/stores/jobStore";
 import { useConfigStore } from "@/shared/stores/configStore";
@@ -31,11 +33,14 @@ import type {
   JobSummaryDto,
   MatchPairDto,
   ResultPageDto,
+  ReviewDecisionDto,
+  ReviewDecisionValue,
   ScoreBreakdownDto,
 } from "@/shared/tauri/types";
 import { useDebounced } from "@/shared/hooks";
 import { ResultsTable } from "./ResultsTable";
 import { ExplanationPanel } from "./ExplanationPanel";
+import { ReviewToolbar } from "./ReviewToolbar";
 
 const PAGE_LIMIT = 1000;
 
@@ -52,6 +57,10 @@ export function ResultsTab() {
   const [summary, setSummary] = useState<JobSummaryDto | null>(null);
   const [page, setPage] = useState<ResultPageDto | null>(null);
   const [selectedRow, setSelectedRow] = useState<MatchPairDto | null>(null);
+  const [decisions, setDecisions] = useState<Record<string, ReviewDecisionDto>>(
+    {},
+  );
+  const [savingRows, setSavingRows] = useState<Set<number>>(() => new Set());
   const [breakdown, setBreakdown] = useState<ScoreBreakdownDto | null>(null);
   const [explainLoading, setExplainLoading] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
@@ -83,6 +92,7 @@ export function ResultsTab() {
   useEffect(() => {
     if (!activeJobId) {
       setPage(null);
+      setDecisions({});
       return;
     }
     let cancelled = false;
@@ -135,6 +145,35 @@ export function ResultsTab() {
   ]);
 
   useEffect(() => {
+    if (!activeJobId) {
+      setDecisions({});
+      return;
+    }
+    let cancelled = false;
+    getDecisions(activeJobId)
+      .then((items) => {
+        if (cancelled) return;
+        setDecisions(
+          Object.fromEntries(items.map((item) => [decisionKey(item), item])),
+        );
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        pushToast({
+          tone: "error",
+          title: "Could not load review decisions",
+          message:
+            typeof err === "object" && err && "message" in err
+              ? String((err as { message: unknown }).message)
+              : String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobId, pushToast]);
+
+  useEffect(() => {
     if (!activeJobId || !selectedRow) {
       setBreakdown(null);
       setExplainError(null);
@@ -167,6 +206,28 @@ export function ResultsTab() {
     };
   }, [activeJobId, selectedRow]);
 
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!activeJobId || isTypingTarget(event.target)) return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        onNextPending();
+        return;
+      }
+      if (!selectedRow || savingRows.has(selectedRow.row_id)) return;
+      if (event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        void onDecision(selectedRow, "accepted");
+      } else if (event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        void onDecision(selectedRow, "rejected");
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeJobId, selectedRow, savingRows, decisions, page]);
+
   if (!activeJobId) {
     return (
       <Card className="dot-grid">
@@ -183,12 +244,71 @@ export function ResultsTab() {
   const lastPage = Math.max(0, Math.ceil(total / PAGE_LIMIT) - 1);
   const availableLevels = page?.available_levels ?? [];
   const levelCounts = page?.level_counts ?? {};
+  const pageRows = page?.rows ?? [];
+  const reviewCounts = pageRows.reduce(
+    (acc, row) => {
+      const decision = decisions[decisionKey(row)]?.decision;
+      if (decision === "accepted") acc.accepted += 1;
+      else if (decision === "rejected") acc.rejected += 1;
+      else acc.pending += 1;
+      return acc;
+    },
+    { accepted: 0, rejected: 0, pending: 0 },
+  );
+  const decisionValues = Object.fromEntries(
+    Object.entries(decisions).map(([key, value]) => [key, value.decision]),
+  ) as Record<string, ReviewDecisionValue>;
 
   function toggleLevel(level: number) {
     const next = levels.includes(level)
       ? levels.filter((value) => value !== level)
       : [...levels, level].sort((a, b) => a - b);
     patchView({ levels: next, pageIndex: 0 });
+  }
+
+  async function onDecision(
+    row: MatchPairDto,
+    decision: ReviewDecisionValue,
+  ) {
+    if (!activeJobId) return;
+    setSavingRows((current) => new Set(current).add(row.row_id));
+    try {
+      const saved = await saveDecision({
+        job_id: activeJobId,
+        row_id: row.row_id,
+        source_id: row.source_id,
+        target_id: row.target_id,
+        decision,
+      });
+      setDecisions((current) => ({ ...current, [decisionKey(saved)]: saved }));
+    } catch (err: unknown) {
+      pushToast({
+        tone: "error",
+        title: "Could not save review decision",
+        message:
+          typeof err === "object" && err && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err),
+      });
+    } finally {
+      setSavingRows((current) => {
+        const next = new Set(current);
+        next.delete(row.row_id);
+        return next;
+      });
+    }
+  }
+
+  function onNextPending() {
+    const startIndex = selectedRow
+      ? pageRows.findIndex((row) => row.row_id === selectedRow.row_id) + 1
+      : 0;
+    const orderedRows = [...pageRows.slice(startIndex), ...pageRows.slice(0, startIndex)];
+    const next = orderedRows.find((row) => {
+      const decision = decisions[decisionKey(row)]?.decision;
+      return decision !== "accepted" && decision !== "rejected";
+    });
+    if (next) setSelectedRow(next);
   }
 
   async function onExport(format: ExportFormatDto) {
@@ -456,12 +576,23 @@ export function ResultsTab() {
             </Button>
           </div>
         </div>
+        <ReviewToolbar
+          total={pageRows.length}
+          accepted={reviewCounts.accepted}
+          rejected={reviewCounts.rejected}
+          pending={reviewCounts.pending}
+          disabled={loading}
+          onNextPending={onNextPending}
+        />
         <div className="flex">
           <div className="min-w-0 flex-1">
             <ResultsTable
-              rows={page?.rows ?? []}
+              rows={pageRows}
               selectedRowId={selectedRow?.row_id ?? null}
+              decisions={decisionValues}
+              savingRowIds={savingRows}
               onSelectRow={setSelectedRow}
+              onDecision={onDecision}
             />
           </div>
           {selectedRow && (
@@ -476,5 +607,20 @@ export function ResultsTab() {
         </div>
       </Card>
     </div>
+  );
+}
+
+function decisionKey(row: { source_id: number; target_id: number }) {
+  return `${row.source_id}:${row.target_id}`;
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return (
+    target.isContentEditable ||
+    tag === "input" ||
+    tag === "textarea" ||
+    tag === "select"
   );
 }

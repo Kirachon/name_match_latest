@@ -1,18 +1,25 @@
 import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { MatchPairDto } from "@/shared/tauri/types";
+import type { MatchPairDto, ReviewDecisionValue } from "@/shared/tauri/types";
 import { MatchRow } from "./MatchRow";
 
-const COL_TEMPLATE = "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px";
+const COL_TEMPLATE =
+  "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px 116px";
 
 export function ResultsTable({
   rows,
   selectedRowId,
+  decisions,
+  savingRowIds,
   onSelectRow,
+  onDecision,
 }: {
   rows: MatchPairDto[];
   selectedRowId: number | null;
+  decisions: Record<string, ReviewDecisionValue>;
+  savingRowIds: Set<number>;
   onSelectRow: (row: MatchPairDto) => void;
+  onDecision: (row: MatchPairDto, decision: ReviewDecisionValue) => void;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
@@ -45,6 +52,7 @@ export function ResultsTable({
         </div>
         <div role="columnheader">Level / method</div>
         <div role="columnheader">Fields</div>
+        <div role="columnheader">Review</div>
       </div>
       <div
         style={{
@@ -63,11 +71,18 @@ export function ResultsTable({
               top={vi.start}
               height={vi.size}
               selected={selectedRowId === r.row_id}
+              decision={decisions[decisionKey(r)]}
+              decisionSaving={savingRowIds.has(r.row_id)}
               onSelect={() => onSelectRow(r)}
+              onDecision={(decision) => onDecision(r, decision)}
             />
           );
         })}
       </div>
     </div>
   );
+}
+
+function decisionKey(row: MatchPairDto) {
+  return `${row.source_id}:${row.target_id}`;
 }
