@@ -63,6 +63,12 @@
 - pnpm 10, Node 20+
 - `$env:CARGO_HOME = "C:\cargo_nm_temp"` workaround on this host
 
+### Documentation Refresh
+
+- Tauri v2 command work must include `#[tauri::command]`, `generate_handler!` registration, capability/permission review when needed, frontend invoke wrappers, and command tests for critical paths.
+- React interaction work must include keyboard event handling, focus/blur state, and focus-return behavior for row selection, panels, review controls, and file-drop controls.
+- Vitest/Testing Library work should isolate UI components with command/module mocks and cover loading, data, error, unsupported, and keyboard/focus states.
+
 ### Component Extraction (Wave 0 — before any feature work)
 
 All three reviewers flagged existing files as too large; extract first to prevent the new feature work from making them unmaintainable.
@@ -144,7 +150,7 @@ All three reviewers flagged existing files as too large; extract first to preven
 | B1.2 | Implement `CsvLoader` (encoding detect/decode, delimiter detect, date parse, header validation, parse warnings) | [B1.1] | `src/loaders/csv_loader.rs` (new module) | Unit tests: UTF-8, Windows-1252, semicolon-delimited, MM/DD/YYYY dates, invalid headers, formula-injection values |
 | B1.3 | Add `load_csv_preview` Tauri command and register frontend/backend mirrors | [B1.2] | `src-tauri/src/commands/files.rs` (new), `src-tauri/src/commands/mod.rs`, `src-tauri/src/main.rs`, `ui/src/shared/tauri/commands.ts`, `ui/src/shared/tauri/types.ts`, `ui/src/shared/tauri/zod-schemas.ts` | Returns preview JSON with headers, warnings, detected encoding/delimiter |
 | B1.4 | Add file-backed run source that reuses `RunService::start` lifecycle | [B1.2, A1] | `src/run_service/`, `src-tauri/src/commands/files.rs` | Produces MatchPairDto results identical to DB-sourced run on equivalent data; cancel/progress/store behavior matches DB path |
-| B1.5 | Build `FileSourceCard.tsx` + `DataSourceSwitcher.tsx` | [A5, B1.6] | `ui/src/features/connect/` | Drag-drop + browse work, preview renders, overrides functional, warnings/errors/loading/cancel states covered |
+| B1.5 | Build `FileSourceCard.tsx` + `DataSourceSwitcher.tsx` | [A5, B1.3, B1.4, B1.6] | `ui/src/features/connect/` | Drag-drop + browse work, preview renders, overrides functional, runnable file-source config emits correctly, warnings/errors/loading/cancel states covered |
 | B1.6 | Add discriminated source state for Database vs File | [] | `ui/src/shared/stores/connectionStore.ts`, `ui/src/features/configure/ConfigureTab.tsx`, run config builders | State persists across navigation; readiness and summary support DB/file independently for source and target |
 | B1.7 | End-to-end integration test: CSV file → column map → run → export | [A5, A6, B1.4, B1.5, B1.6] | `tests/csv_e2e.rs` (new) | Pass on Windows-1252 + UTF-8 fixtures with mismatched columns |
 
@@ -176,7 +182,7 @@ All three reviewers flagged existing files as too large; extract first to preven
 |---|------|-----------|----------|------------|
 | F1.1 | Define `ScoreBreakdown` struct (Lev/JW/Metaphone scores, case triggered, swap used) | [] | `src/matching/mod.rs` | Compiles, serde round-trip test |
 | F1.2 | Add public explanation API for `Fuzzy` / `FuzzyNoMiddle` that returns `ScoreBreakdown` | [F1.1] | `src/matching/mod.rs` | Existing match tests still pass; breakdown values match expected scorer output |
-| F1.3 | Keep job-time person snapshots / lookup index plus config/mapping metadata for explainability | [B1.4] | `src/run_service/store.rs`, `src/run_service/dto.rs` | Persons retrievable by source/target ID after run completes until job is evicted or loaded from SQLite |
+| F1.3 | Keep job-time person snapshots / lookup index plus config/mapping metadata for explainability | [A6, B1.4] | `src/run_service/store.rs`, `src/run_service/dto.rs` | Persons retrievable by source/target ID after run completes until job is evicted or loaded from SQLite |
 | F1.4 | Add `explain_pair` Tauri command and frontend/backend mirrors | [F1.2, F1.3] | `src-tauri/src/commands/results.rs`, `src-tauri/src/commands/mod.rs`, `src-tauri/src/main.rs`, `ui/src/shared/tauri/commands.ts`, `ui/src/shared/tauri/types.ts`, `ui/src/shared/tauri/zod-schemas.ts` | Returns correct breakdown for known fuzzy pair; returns clear unsupported state for unsupported algorithms |
 | F1.5 | Build `ExplanationPanel.tsx` + `ScoreBreakdown.tsx` | [X3] | `ui/src/features/results/` | Panel renders mock data, loading, error, unsupported, and close/focus states |
 | F1.6 | Wire keyboard/click row selection → `explain_pair` → panel | [F1.4, F1.5] | `ui/src/features/results/ResultsTab.tsx`, `ui/src/features/results/ResultsTable.tsx` | Click/Enter row → panel shows real breakdown within 100 ms; stale responses ignored |
@@ -203,7 +209,7 @@ All three reviewers agreed this is a hard dependency for Features C and E. Backe
 | P1 | Design app-scoped SQLite schema (jobs, results, result_person_lookup, decisions) with schema versioning, WAL, busy timeout, indexes, rollback/delete semantics | [] | `src/run_service/store.rs` | Schema reviewed; migrations idempotent; paging/sort/diff indexes documented |
 | P2 | Implement transactional SQLite write-through when jobs complete | [P1] | `src/run_service/store.rs` | Restart app → previous job loadable via `summary()`, `list_summaries()`, and `page()` |
 | P3 | Migrate all ResultStore read/delete/export surfaces to SQLite fallback when evicted from memory | [P2] | `src/run_service/store.rs`, `src-tauri/src/commands/results.rs` | 51st job remains accessible; `summary`, `list_summaries`, `page`, `export_results`, `forget_job`, and restart listing work |
-| P4 | Add stable ID strategy for all file-sourced jobs (user-designated ID column or deterministic content key with collision checks) | [B1.2] | `src/loaders/csv_loader.rs`, `src/loaders/excel_loader.rs` | Re-import same file → same IDs; row-index mode warns and disables run-over-run diff |
+| P4 | Add shared stable-ID strategy for file-sourced jobs plus CSV implementation (user-designated ID column or deterministic content key with collision checks) | [B1.2] | `src/loaders/csv_loader.rs`, `src/run_service/dto.rs` | Re-import same CSV → same IDs; row-index mode warns and disables run-over-run diff; shared interface ready for Excel |
 
 ---
 
@@ -223,9 +229,9 @@ All three reviewers agreed this is a hard dependency for Features C and E. Backe
 | # | Task | depends_on | Location | Validation |
 |---|------|-----------|----------|------------|
 | B2.1 | Add `calamine` dependency | [] | `Cargo.toml` | Compiles |
-| B2.2 | Implement `ExcelLoader` (sheet select, cached formula values, serial-date → NaiveDate, memory guard) | [B1.2, P4] | `src/loaders/excel_loader.rs` (new) | Tests: cached formula values, missing-cache warning/reject, serial dates, > 200 MB rejection |
+| B2.2 | Implement `ExcelLoader` (sheet select, cached formula values, serial-date → NaiveDate, memory guard, shared stable-ID interface) | [B1.2, P4] | `src/loaders/excel_loader.rs` (new) | Tests: cached formula values, missing-cache warning/reject, serial dates, > 200 MB rejection, stable ID behavior |
 | B2.3 | Add sheet picker to `FileSourceCard` | [B2.2] | `ui/src/features/connect/FileSourceCard.tsx` | Shows sheets when .xlsx selected; selection works |
-| B2.4 | Integration test: .xlsx → map → run → export | [B2.2] | `tests/excel_e2e.rs` (new) | Pass on a multi-sheet fixture with formulas + dates |
+| B2.4 | Integration test: .xlsx → map → run → export | [B1.4, B2.2, B2.3] | `tests/excel_e2e.rs` (new) | Pass on a multi-sheet fixture with formulas + dates |
 
 ---
 
@@ -359,9 +365,42 @@ GPU scoring happens in CUDA kernels that don't return per-pair breakdowns. Imple
 | 1.2b | P2 | P1 done | Transactional write-through |
 | 1.2c | P3, B2.1, C3 | P2 / P4 as applicable | Store read fallback + backend foundations |
 | 1.2d | B2.2, C1, C4, E1 | P3 / P4 / C3 as applicable | Excel loader, decisions, diff backend, review UI |
-| 1.2e | B2.3, C2, C5, C6, C7, E2, E3 | upstream done | Commands + UI |
-| 1.2f | B2.4, E4 | upstream done | Integration |
+| 1.2e-api | C2, E2 | upstream done | Results commands + shared command/type/Zod mirrors; one sync owner owns `results.rs`, `commands.ts`, `types.ts`, `zod-schemas.ts` |
+| 1.2e-ui | B2.3, C4, E3 | upstream done | Independent UI surfaces after API contracts settle; no shared existing-file edits without sync |
+| 1.2f | C5, C6, C7, E4 | 1.2e-api / 1.2e-ui done | Store/export/config/result wiring after command and UI contracts exist |
+| 1.2g | B2.4 | upstream done | Excel integration |
 | **v1.2 ship** | | All v1.2 tasks done | ~4-5 weeks single dev |
+
+---
+
+## Swarm Planner Execution Contract
+
+**Plan mode**: swarm-planner artifact, not Context Engine plan mode. Use `/parallel-task docs/feature-roadmap-plan.md` and execute the first unblocked wave only.
+
+**Initial scope lock**
+
+| Wave | Allowed file surfaces | Max parallel owners | Stop conditions |
+|------|----------------------|---------------------|-----------------|
+| 0a | `ui/src/features/connect/ConnectTab.tsx`, `ui/src/features/results/ResultsTab.tsx`, `ui/src/features/configure/ConfigureTab.tsx`, new extracted component files | 3 | Any behavior change, visual drift, or new dependency outside UI extraction |
+| 0b | `ui/src/features/connect/ConnectTab.tsx`, `ui/src/features/connect/SchemaQuality.tsx`, `ui/src/features/results/ResultsTable.tsx`, `ui/src/features/results/MatchRow.tsx` | 2 | Same-file overlap outside the assigned component boundary |
+| 1.1a-1.1e | Only files listed by each task row plus required DTO/Zod/command mirrors | By dependency wave | New run lifecycle, missing command registration, or unmapped validation surface |
+| 1.2a-1.2g | Only files listed by each task row plus required DTO/Zod/command mirrors | By dependency wave | SQLite scope drift, row-index diff treated as stable, same command/type file edited by multiple workers without a sync owner, or unsupported explanation shown as success |
+
+**Parallel-task assignment rules**
+
+- Assign one task per agent unless a task row explicitly groups tightly coupled files.
+- Do not assign tasks that touch the same existing file in the same wave unless the plan names a sync point.
+- Each worker must update this plan with status, files changed, validation run, and blockers before returning.
+- After each wave, reread this plan and start only the next unblocked wave.
+- If validation fails, fix inside the same task scope; if the fix needs new files outside the scope lock, stop and replan.
+
+**Definition of done for each task**
+
+- All `depends_on` tasks are complete.
+- Listed validation passes or is explicitly blocked with command output.
+- Rust DTO changes are mirrored in TypeScript types and Zod schemas.
+- Tauri command changes are registered in Rust command modules, `generate_handler!`, frontend wrappers, and relevant capabilities.
+- UI changes include keyboard, focus, loading, error, empty, and narrow-width behavior where applicable.
 
 ---
 
