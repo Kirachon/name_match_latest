@@ -1,3 +1,16 @@
+// =============================================================================
+// DEPRECATION NOTICE — Legacy egui GUI
+// =============================================================================
+// This binary is preserved during the Tauri v2 migration so that the existing
+// release lane keeps working. New feature work happens in the Tauri shell at
+// `src-tauri/` and the React front-end at `ui/`. See
+// `docs/tauri-migration-plan.md` and `docs/tauri-development.md` for the
+// migration plan and operator handoff.
+//
+// To build this binary you must explicitly opt into the `gui` feature:
+//   cargo build --release --features gui --bin gui
+// =============================================================================
+
 // SRS-II Name Matching Application GUI
 // Creator/Author: Matthias Tangonan
 // This file implements the desktop GUI using eframe/egui.

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Name Matcher",
+  "version": "0.1.0",
+  "identifier": "io.namematcher.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../ui dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm --dir ../ui build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Name Matcher",
+        "label": "main",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1100,
+        "minHeight": 700,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "fullscreen": false,
+        "center": true,
+        "theme": "Dark",
+        "backgroundColor": "#0b0f17",
+        "shadow": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "category": "DeveloperTool",
+    "shortDescription": "Operational name-matching desktop tool",
+    "longDescription": "Tauri v2 desktop shell around the name_matcher Rust engine. Connects to MySQL, runs deterministic and fuzzy matching algorithms with GPU acceleration, and exports paginated results.",
+    "publisher": "Name Matcher",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "wix": {
+        "language": "en-US"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

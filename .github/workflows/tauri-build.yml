@@ -1,0 +1,153 @@
+name: tauri-build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "src/**"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/**"
+      - "ui/**"
+      - ".github/workflows/tauri-build.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "src/**"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/**"
+      - "ui/**"
+      - ".github/workflows/tauri-build.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PNPM_VERSION: "10"
+  NODE_VERSION: "20"
+
+jobs:
+  build_tauri_cpu:
+    name: Tauri CPU (windows-latest)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install JS deps
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint TypeScript
+        working-directory: ui
+        run: pnpm lint
+
+      - name: Build front-end
+        working-directory: ui
+        run: pnpm build
+
+      - name: cargo check (root, default)
+        run: cargo check --locked
+
+      - name: cargo check (gui feature)
+        run: cargo check --locked --features gui
+
+      - name: cargo check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: cargo test (run_service)
+        run: cargo test --locked --lib run_service::
+
+      - name: Tauri build (no bundle)
+        working-directory: src-tauri
+        run: cargo tauri build --no-bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: name-matcher-tauri-windows-cpu
+          path: src-tauri/target/release/name-matcher-tauri.exe
+
+  build_tauri_gpu:
+    name: Tauri GPU (self-hosted CUDA)
+    runs-on: [self-hosted, windows, cuda]
+    needs: [build_tauri_cpu]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Verify nvcc
+        run: nvcc --version
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install JS deps
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build front-end
+        working-directory: ui
+        run: pnpm build
+
+      - name: Tauri build with GPU feature
+        working-directory: src-tauri
+        run: cargo tauri build --features gpu --no-bundle
+
+      - name: Inspect required CUDA runtime DLLs
+        shell: pwsh
+        run: |
+          $dist = "src-tauri\target\release"
+          $expected = @("nvrtc64_*.dll", "nvrtc-builtins64_*.dll")
+          foreach ($pattern in $expected) {
+            $matches = Get-ChildItem "dist\gpu-dlls" -Filter $pattern -File -ErrorAction SilentlyContinue
+            if ($matches.Count -eq 0) {
+              Write-Error "Missing required GPU runtime DLL matching: $pattern"
+              exit 1
+            }
+            foreach ($m in $matches) {
+              Copy-Item $m.FullName $dist -Force
+            }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: name-matcher-tauri-windows-gpu
+          path: |
+            src-tauri/target/release/name-matcher-tauri.exe
+            src-tauri/target/release/nvrtc64_*.dll
+            src-tauri/target/release/nvrtc-builtins64_*.dll

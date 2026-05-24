@@ -399,6 +399,12 @@ pub struct CascadeLevelEntry {
     pub status: CascadeLevelStatus,
     pub match_count: usize,
     pub output_path: Option<String>,
+    /// In-memory copy of the level's match pairs. Populated when the
+    /// cascade run is invoked via `run_cascade_inmemory` so embedded
+    /// callers (e.g. the Tauri shell) don't need to parse the CSV files
+    /// back. Empty for skipped/failed levels.
+    #[doc(hidden)]
+    pub matches: Vec<MatchPair>,
 }
 
 /// Status of a cascade level
@@ -624,6 +630,7 @@ where
                     status: CascadeLevelStatus::Skipped(reason),
                     match_count: 0,
                     output_path: None,
+                    matches: Vec::new(),
                 });
                 continue;
             }
@@ -647,6 +654,7 @@ where
                     status: CascadeLevelStatus::Failed("Invalid level number".to_string()),
                     match_count: 0,
                     output_path: None,
+                    matches: Vec::new(),
                 });
                 continue;
             }
@@ -741,6 +749,7 @@ where
                     status: CascadeLevelStatus::Completed,
                     match_count,
                     output_path: Some(output_path),
+                    matches: matches.clone(),
                 });
             }
             Err(e) => {
@@ -751,6 +760,7 @@ where
                     status: CascadeLevelStatus::Failed(format!("Write error: {}", e)),
                     match_count,
                     output_path: None,
+                    matches: matches.clone(),
                 });
             }
         }

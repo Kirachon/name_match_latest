@@ -9,6 +9,8 @@ pub mod util;
 
 pub mod optimization;
 
+pub mod run_service;
+
 #[cfg(feature = "new_engine")]
 pub mod engine;
 #[cfg(feature = "new_engine")]

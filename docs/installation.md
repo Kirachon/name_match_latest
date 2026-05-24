@@ -4,10 +4,15 @@
 
 1. Go to the GitHub Releases page for this repository.
 2. Download the appropriate archive:
-   - `gui-windows-cpu-<tag>.zip` — Windows GUI (CPU only)
-   - `gui-linux-cpu-<tag>.tar.gz` — Linux GUI (CPU only)
-3. Extract the archive to your desired location.
-4. Run the `gui` executable directly (no installation required).
+   - **Tauri desktop shell (recommended for desktop users):**
+     - `name-matcher-tauri-windows-cpu-<tag>.msi`
+     - `name-matcher-tauri-windows-gpu-<tag>.msi` (CUDA-capable hosts only)
+   - **Legacy egui GUI (still published during migration):**
+     - `gui-windows-cpu-<tag>.zip`
+     - `gui-linux-cpu-<tag>.tar.gz`
+3. Extract the archive (or run the MSI installer) to your desired location.
+4. Run the executable. The Tauri shell may prompt to install the WebView2
+   runtime if it is missing — accept the prompt to continue.
 
 ## Option B: Build from Source
 
@@ -113,3 +118,41 @@ DB2_USER=reader
 DB2_PASS=secret
 DB2_DATABASE=other_db
 ```
+
+
+
+## Option D: Build the Tauri v2 desktop shell
+
+Prerequisites:
+
+- Rust 1.89.0 (pin via `rust-toolchain.toml`).
+- Node.js 20+ and pnpm 10+.
+- `cargo-tauri` v2: `cargo install tauri-cli --version "^2" --locked`.
+- WebView2 runtime (bundled on modern Windows 10/11; otherwise install from
+  Microsoft's evergreen runtime).
+- CUDA Toolkit 12.x for the GPU lane (optional).
+
+```powershell
+cd D:\path\to\name_match_latest
+# Front-end deps (one-time)
+cd ui
+pnpm install
+cd ..
+
+# Dev mode (hot-reload):
+cargo tauri dev
+
+# Release build (CPU):
+powershell -File scripts\windows\Build-Tauri-Cpu.ps1
+
+# Release build (GPU):
+powershell -File scripts\windows\Build-Tauri-Gpu.ps1
+```
+
+The Tauri shell talks to MySQL through the same `name_matcher` engine as the
+CLI; the **Connect** tab in the UI replaces environment variables for
+day-to-day operator use, while environment-driven and CLI flows remain
+fully supported.
+
+See [`docs/tauri-development.md`](tauri-development.md) for the full
+developer workflow, IPC contract, and troubleshooting.

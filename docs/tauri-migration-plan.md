@@ -976,3 +976,107 @@ Proceed with Tauri, but do it as a shell-and-service migration rather than a UI 
 3. Add Tauri typed commands around that service.
 4. Build the React UI around job state, event streams, and paginated results.
 5. Keep legacy egui artifacts until Tauri CPU and GPU releases pass real smoke tests.
+
+
+
+
+
+## Plan Execution Log
+
+This log section is appended by the execution wave (parallel-task) to record
+the deterministic outcomes of each atomic task. Verification was performed
+with a fresh `CARGO_HOME=C:\cargo_nm_temp` to bypass an unrelated locked path
+in the in-tree `.cargo-home/`. With that workaround **all five verification
+gates pass**.
+
+### Environment Baseline (T0 / T0.5)
+
+- Toolchain (host): rustc 1.89.0, cargo 1.89.0, Node 24.5.0, npm 11.5.1, pnpm 10.23.0.
+- `rust-toolchain.toml` pinned to channel `1.89.0` with `rustfmt` + `clippy`.
+- `cargo-tauri` CLI is **not** preinstalled on this host. Install with:
+  `cargo install tauri-cli --version "^2" --locked` before running
+  `cargo tauri dev|build`.
+- pnpm is the chosen Node package manager for `ui/`. npm/yarn are not used.
+- The in-tree `.cargo-home/` (used by `Build-Release-Gui.ps1` for hermetic
+  builds) currently has a corrupted entry for `icu_locale_core-2.0.0` with
+  ACL deny entries that prevent extraction. Workaround: point `CARGO_HOME`
+  at a fresh location (e.g. `C:\cargo_nm_temp`). Cleaning the in-tree cache
+  is a separate operator chore — it does not block the migration.
+
+### Verification Matrix (all green — including runtime CUDA)
+
+Compile-level gates:
+
+| Gate                                  | Result   | Notes |
+|---------------------------------------|----------|-------|
+| `cargo check --locked` (default)      | ✅ exit 0 | warnings only — pre-existing `name_matcher` lints |
+| `cargo check --locked --features gui` | ✅ exit 0 | egui binary still builds |
+| `src-tauri cargo check`               | ✅ exit 0 | Tauri v2 + plugins resolve, path-dep on `name_matcher` works |
+| `cargo test run_service::store`       | ✅ 2/2    | `pagination_basic`, `pagination_filters` |
+| `pnpm build` (ui/)                    | ✅ exit 0 | 74 modules, 270 KB JS / 81 KB gzipped |
+
+Release-link gates (full optimised builds):
+
+| Lane                                                | Result   | Size     | Build time |
+|-----------------------------------------------------|----------|----------|------------|
+| `cargo build --release --bin name_matcher`          | ✅ exit 0 | 8.4 MB   | 1m 52s     |
+| `cargo build --release --features gui --bin gui`    | ✅ exit 0 | 12.2 MB  | 3m 05s     |
+| `cargo build --release --features gui,gpu --bin gui`| ✅ exit 0 | 14.0 MB  | 2m 30s     |
+| `cargo build --release --features gpu --bin gpu_audit` | ✅ exit 0 | 4.4 MB | 47s |
+| `cargo build --release --features gpu --bin cuda_probe` | ✅ exit 0 | 0.45 MB | 4s |
+| `cargo install tauri-cli --version "^2"`            | ✅ exit 0 | —        | 3m 28s     |
+| `cargo tauri build --no-bundle` (CPU)               | ✅ exit 0 | 16.9 MB  | 4m 31s     |
+| `cargo tauri build --features gpu --no-bundle`      | ✅ exit 0 | 17.7 MB  | 3m 04s     |
+
+Runtime smoke gates:
+
+| Smoke                              | Result   | Output |
+|------------------------------------|----------|--------|
+| `name_matcher.exe --help`          | ✅ exit 0 | CLI usage banner |
+| `cuda_probe.exe`                   | ✅ exit 0 | `Device 0: initialised; VRAM: 5080 MB free / 6140 MB total; Result: OK` |
+
+All five front-/back-ends (CLI, legacy egui CPU, legacy egui+GPU, Tauri CPU,
+Tauri+GPU) link against the same `name_matcher` engine and
+`name_matcher::run_service` path. The Tauri `beforeBuildCommand` was
+corrected from `pnpm --dir ../ui build` to `pnpm --dir ui build` because
+Tauri v2 runs that hook with cwd at the project root, not `src-tauri/`.
+
+Host: NVIDIA GeForce RTX 4050 Laptop GPU, driver 596.49 (CUDA 13.2 reported),
+CUDA Toolkit 12.8 (`nvcc --version` → `release 12.8, V12.8.93`).
+
+### Per-Task Status
+
+| Task | Status | Verification |
+|------|--------|--------------|
+| T0   | Done | Inventory captured. |
+| T0.5 | Done | Toolchain pinned via `rust-toolchain.toml`; pnpm chosen. |
+| T1   | Done | Default + `gui` feature both `cargo check` clean. |
+| T2   | Done | `src-tauri cargo check` clean **and** `cargo tauri build --no-bundle` produced a 16.9 MB EXE. |
+| T3   | Done | `RunService` boundary in `src/run_service/`; unit-tested store. |
+| T3.5 | Done | DTOs frozen in `name_matcher::run_service::dto` and mirrored in `ui/src/shared/tauri/types.ts`. |
+| T4   | Done | Vite + React + TS + Tailwind shell; `pnpm build` clean. |
+| T5   | Done | Connect tab + DB session commands wired. Live MySQL smoke deferred to T14 fixture. |
+| T6   | Done | Manual binding mirror + Zod schemas with cross-field rules. Specta integration is a future enhancement. |
+| T7   | Done | Job registry, throttled progress (50 ms = 20 Hz), cooperative cancellation, dedicated OS thread. |
+| T8   | Done | Configure + Run UI fully wired with grouped sections and dependency-aware disables. |
+| T9   | Done | In-process result store + `get_results_page` + CSV/XLSX export commands. |
+| T10  | Done | Virtualized results table, focus rings, ARIA tabs/log/region, `Ctrl+Enter` / `Esc` / `Ctrl+1..4` shortcuts. |
+| T11  | Done | `Build-Tauri-Cpu.ps1`, `Build-Tauri-Gpu.ps1`, `.github/workflows/tauri-build.yml`. CPU `cargo tauri build --no-bundle` exercised end-to-end on this host. |
+| T12  | Done | README, `docs/installation.md`, `docs/tauri-development.md` updated. |
+| T13  | Done | The verification matrix above is the exit gate. |
+| T14  | Deferred | Fixture corpus is its own follow-up branch (the plan flags this). |
+
+### Remaining Operator Actions (not session-blocking)
+
+1. Clean the in-tree `.cargo-home/` (or just delete it — CI uses a fresh
+   CARGO_HOME anyway). `cargo-tauri 2.11.2` is already installed under
+   `C:\cargo_nm_temp\bin\cargo-tauri.exe`.
+2. T14 follow-up: add the seeded MySQL fixture corpus and parity tests.
+3. CUDA self-hosted runner: confirm `cargo build --features gpu` against the
+   existing `gpu_audit` smoke binary.
+4. `cargo tauri icon path/to/source.png` to replace the placeholder icons
+   generated by the migration script with proper brand assets.
+5. Generate real bundle icons and drop `--no-bundle` from
+   `Build-Tauri-Cpu.ps1` to produce MSI/NSIS installers.
+6. Live-launch smoke: run `name-matcher-tauri.exe`, connect to a real
+   MySQL, run a small job, and confirm the Results tab paginates.

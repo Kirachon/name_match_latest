@@ -3,18 +3,53 @@ name = "name_matcher"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "name_matcher"
+path = "src/lib.rs"
+
+# Default CLI binary (no GUI deps required)
+[[bin]]
+name = "name_matcher"
+path = "src/main.rs"
+
+# Legacy egui GUI binary — gated behind the `gui` feature so CPU CLI
+# builds, the Tauri shell, and CI lanes do not pull egui/eframe/rfd unless
+# explicitly requested.
+[[bin]]
+name = "gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
+
+# GPU audit utility — only meaningful with CUDA available.
+[[bin]]
+name = "gpu_audit"
+path = "src/bin/gpu_audit.rs"
+required-features = ["gpu"]
+
+# Standalone CUDA-only smoke: probes the runtime, prints VRAM, exits 0/1.
+# Useful for clean-machine release inspection without needing MySQL.
+[[bin]]
+name = "cuda_probe"
+path = "src/bin/cuda_probe.rs"
+required-features = ["gpu"]
+
+# Seeding helper for development/test fixtures.
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"
+
 [dependencies]
 anyhow = "1.0.99"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 csv = "1.3.1"
 cudarc = { version = "0.17.3", features = ["nvrtc"], optional = true }
-eframe = "0.32.3"
-egui = "0.32.3"
+eframe = { version = "0.32.3", optional = true }
+egui = { version = "0.32.3", optional = true }
 env_logger = "0.11.8"
 log = "0.4.28"
 rayon = "1.11.0"
-rfd = "0.15.4"
+rfd = { version = "0.15.4", optional = true }
 rphonetic = "3.0.4"
 rust_xlsxwriter = "0.90.1"
 serde = { version = "1.0.225", features = ["derive"] }
@@ -30,7 +65,9 @@ unicode-normalization = "0.1.24"
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 [features]
+default = []
 gpu = ["dep:cudarc", "cudarc/cuda-version-from-build-system"]
+gui = ["dep:eframe", "dep:egui", "dep:rfd"]
 new_cli = []
 new_engine = []
 

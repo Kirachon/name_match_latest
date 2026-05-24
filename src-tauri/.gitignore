@@ -1,0 +1,12 @@
+# Tauri build artifacts
+target/
+gen/
+
+# Icon binaries are required by tauri.conf.json for clean bundle builds.
+icons/*.icns
+!icons/*.png
+!icons/*.ico
+!icons/README.md
+
+# Tauri-Specific
+*.pdb
