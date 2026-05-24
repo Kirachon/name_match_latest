@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppErrorDto,
   CudaDiagnosticsDto,
+  CsvPreviewDto,
+  CsvPreviewRequestDto,
   DbCredentialsDto,
   DbSessionDto,
   ExportRequestDto,
@@ -66,6 +68,11 @@ export const getRowCount = (sessionId: string, table: string) =>
 export const disconnectDb = (sessionId: string) =>
   call<void>("disconnect_db", { sessionId });
 export const listSessions = () => call<DbSessionDto[]>("list_sessions");
+
+// ---------- File preview/import ----------
+
+export const loadCsvPreview = (request: CsvPreviewRequestDto) =>
+  call<CsvPreviewDto>("load_csv_preview", { request });
 
 // ---------- Matching ----------
 

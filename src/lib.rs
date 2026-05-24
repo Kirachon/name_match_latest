@@ -31,6 +31,7 @@
 pub mod config;
 pub mod db;
 pub mod export;
+pub mod loaders;
 pub mod matching;
 pub mod metrics;
 pub mod models;

@@ -25,6 +25,8 @@ export type AlgorithmDto =
 export type ComputeModeDto = "cpu" | "auto" | "force-gpu";
 export type RunModeDto = "auto" | "streaming" | "in-memory";
 export type ExportFormatDto = "csv" | "xlsx" | "both";
+export type CsvEncodingDto = "utf8" | "utf8-bom" | "windows1252" | "latin1";
+export type CsvDelimiterDto = "comma" | "semicolon" | "tab";
 
 /* ---------- Database ---------- */
 
@@ -76,6 +78,24 @@ export interface TableSelectionDto {
   session_id: string;
   table: string;
   column_mapping?: ColumnMappingDto | null;
+}
+
+export interface CsvPreviewRequestDto {
+  path: string;
+  encoding?: CsvEncodingDto | null;
+  delimiter?: CsvDelimiterDto | null;
+  date_format?: string | null;
+}
+
+export interface CsvPreviewDto {
+  path: string;
+  encoding: CsvEncodingDto;
+  delimiter: CsvDelimiterDto;
+  headers: string[];
+  rows: string[][];
+  warnings: string[];
+  date_format: string;
+  total_preview_rows: number;
 }
 
 /* ---------- Run config ---------- */
