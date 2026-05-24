@@ -2,12 +2,13 @@ use crate::error::{AppError, AppResult};
 use name_matcher::run_service::dto::{
     DbCredentialsDto, DbSessionDto, JobStateEventDto, LogEntryDto, ProgressEventDto,
 };
-use name_matcher::run_service::{EventSink, JobRegistry, ResultStore};
+use name_matcher::run_service::{EventSink, JobRegistry, ResultStore, ResultStoreConfig};
 use sqlx::MySqlPool;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+use tauri::Manager;
 use tokio::time::Instant;
 
 /// One connected MySQL session. We do **not** keep the password around once
@@ -78,11 +79,27 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(app_handle: AppHandle) -> Self {
+        let results = app_handle
+            .path()
+            .app_data_dir()
+            .ok()
+            .and_then(|dir| {
+                ResultStore::with_sqlite_path(
+                    ResultStoreConfig::default(),
+                    dir.join("result_store.sqlite3"),
+                )
+                .map_err(|err| {
+                    log::error!("SQLite result store unavailable; using memory only: {err}");
+                    err
+                })
+                .ok()
+            })
+            .unwrap_or_else(ResultStore::new);
         Self {
             app_handle,
             db: DbRegistry::default(),
             jobs: Arc::new(JobRegistry::default()),
-            results: Arc::new(ResultStore::new()),
+            results: Arc::new(results),
             started_at: Instant::now(),
         }
     }

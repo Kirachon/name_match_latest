@@ -4,8 +4,9 @@
 //! indexed `Vec<MatchPairDto>` per job. Reads happen through
 //! `get_results_page` which builds a deterministic ordered slice.
 //!
-//! Phase 2 (post-Tauri-1) is expected to replace this with a SQLite sidecar
-//! per job. The trait shape here is designed for that swap.
+//! Phase 2 adds an app-scoped SQLite sidecar. Memory remains the hot path, and
+//! completed jobs are written through so evicted/restarted jobs can still be
+//! paged, exported, explained, reviewed, and diffed by later features.
 
 use super::dto::{
     AlgorithmDto, JobStateDto, JobSummaryDto, MatchPairDto, ResultPageDto, ResultPageRequestDto,
@@ -13,7 +14,9 @@ use super::dto::{
 use crate::models::Person;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +42,7 @@ pub struct StoredJob {
 pub struct ResultStore {
     inner: Mutex<HashMap<String, StoredJob>>,
     config: ResultStoreConfig,
+    sqlite: Option<SqliteStore>,
 }
 
 impl Default for ResultStore {
@@ -56,7 +60,16 @@ impl ResultStore {
         Self {
             inner: Mutex::new(HashMap::new()),
             config,
+            sqlite: None,
         }
+    }
+
+    pub fn with_sqlite_path(config: ResultStoreConfig, path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            inner: Mutex::new(HashMap::new()),
+            config,
+            sqlite: Some(SqliteStore::open(path.as_ref())?),
+        })
     }
 
     /// Reserve a slot at job-start time so the frontend can resolve `job_id`
@@ -100,6 +113,9 @@ impl ResultStore {
                 slot.summary.matches_found = rows.len() as u64;
                 slot.rows = rows;
                 slot.last_accessed_unix_ms = now_ms();
+                if let Some(sqlite) = &self.sqlite {
+                    sqlite.save_job(slot)?;
+                }
                 Ok(())
             }
             None => bail!("Unknown job id: {}", job_id),
@@ -118,6 +134,9 @@ impl ResultStore {
                 slot.source_people = source_people;
                 slot.target_people = target_people;
                 slot.last_accessed_unix_ms = now_ms();
+                if let Some(sqlite) = &self.sqlite {
+                    sqlite.save_job(slot)?;
+                }
                 Ok(())
             }
             None => bail!("Unknown job id: {}", job_id),
@@ -133,6 +152,11 @@ impl ResultStore {
             slot.summary.elapsed_secs =
                 ((unix_ms.saturating_sub(slot.summary.started_at_unix_ms)) / 1000) as u64;
             slot.last_accessed_unix_ms = unix_ms;
+            if let Some(sqlite) = &self.sqlite {
+                if let Err(err) = sqlite.save_job(slot) {
+                    log::error!("failed to persist finished job {job_id}: {err}");
+                }
+            }
         }
         self.evict_terminal_locked(&mut g);
     }
@@ -148,21 +172,43 @@ impl ResultStore {
                 slot.summary.elapsed_secs =
                     ((unix_ms.saturating_sub(slot.summary.started_at_unix_ms)) / 1000) as u64;
             }
+            if let Some(sqlite) = &self.sqlite {
+                if let Err(err) = sqlite.save_job(slot) {
+                    log::error!("failed to persist job state {job_id}: {err}");
+                }
+            }
         }
         self.evict_terminal_locked(&mut g);
     }
 
     pub fn summary(&self, job_id: &str) -> Option<JobSummaryDto> {
         let mut g = self.inner.lock();
-        g.get_mut(job_id).map(|s| {
+        if let Some(summary) = g.get_mut(job_id).map(|s| {
             s.last_accessed_unix_ms = now_ms();
             s.summary.clone()
-        })
+        }) {
+            return Some(summary);
+        }
+        drop(g);
+        self.sqlite
+            .as_ref()
+            .and_then(|sqlite| sqlite.load_summary(job_id).ok().flatten())
     }
 
     pub fn list_summaries(&self) -> Vec<JobSummaryDto> {
         let g = self.inner.lock();
-        let mut v: Vec<JobSummaryDto> = g.values().map(|s| s.summary.clone()).collect();
+        let mut by_id: HashMap<String, JobSummaryDto> = self
+            .sqlite
+            .as_ref()
+            .and_then(|sqlite| sqlite.list_summaries().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|summary| (summary.job_id.clone(), summary))
+            .collect();
+        for summary in g.values().map(|s| s.summary.clone()) {
+            by_id.insert(summary.job_id.clone(), summary);
+        }
+        let mut v: Vec<JobSummaryDto> = by_id.into_values().collect();
         v.sort_by_key(|s| std::cmp::Reverse(s.started_at_unix_ms));
         v
     }
@@ -170,10 +216,16 @@ impl ResultStore {
     /// Borrow rows + a copy of summary under one lock.
     pub fn snapshot(&self, job_id: &str) -> Option<StoredJob> {
         let mut g = self.inner.lock();
-        g.get_mut(job_id).map(|s| {
+        if let Some(job) = g.get_mut(job_id).map(|s| {
             s.last_accessed_unix_ms = now_ms();
             s.clone()
-        })
+        }) {
+            return Some(job);
+        }
+        drop(g);
+        self.sqlite
+            .as_ref()
+            .and_then(|sqlite| sqlite.load_job(job_id).ok().flatten())
     }
 
     pub fn forget_job(&self, job_id: &str) -> Result<Option<StoredJob>> {
@@ -183,7 +235,12 @@ impl ResultStore {
                 bail!("Cannot forget active job: {}", job_id);
             }
         }
-        Ok(g.remove(job_id))
+        let removed = g.remove(job_id);
+        drop(g);
+        if let Some(sqlite) = &self.sqlite {
+            sqlite.delete_job(job_id)?;
+        }
+        Ok(removed)
     }
 
     pub fn drop_job(&self, job_id: &str) -> Result<Option<StoredJob>> {
@@ -197,83 +254,18 @@ impl ResultStore {
         }
         validate_levels(&req.levels)?;
         let mut g = self.inner.lock();
-        let slot = g
-            .get_mut(&req.job_id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", req.job_id))?;
+        let Some(slot) = g.get_mut(&req.job_id) else {
+            drop(g);
+            let job = self
+                .sqlite
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", req.job_id))?
+                .load_job(&req.job_id)?
+                .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", req.job_id))?;
+            return page_from_rows(req, &job.rows);
+        };
         slot.last_accessed_unix_ms = now_ms();
-
-        let base_filtered: Vec<&MatchPairDto> = slot
-            .rows
-            .iter()
-            .filter(|r| match req.min_confidence {
-                Some(min) => r.confidence >= min,
-                None => true,
-            })
-            .filter(|r| match req.query.as_deref() {
-                Some(q) if !q.trim().is_empty() => {
-                    let q = q.to_lowercase();
-                    r.source_full_name.to_lowercase().contains(&q)
-                        || r.target_full_name.to_lowercase().contains(&q)
-                }
-                _ => true,
-            })
-            .collect();
-
-        let mut level_counts: BTreeMap<u8, u64> = BTreeMap::new();
-        for row in &base_filtered {
-            if let Some(level) = row.matched_at_level {
-                *level_counts.entry(level).or_insert(0) += 1;
-            }
-        }
-        let available_levels = level_counts.keys().copied().collect();
-
-        let mut filtered: Vec<&MatchPairDto> = if req.levels.is_empty() {
-            base_filtered
-        } else {
-            base_filtered
-                .into_iter()
-                .filter(|row| {
-                    row.matched_at_level
-                        .map(|level| req.levels.contains(&level))
-                        .unwrap_or(false)
-                })
-                .collect()
-        };
-
-        let sort_by = req.sort_by.as_deref().unwrap_or("row_id");
-        let sort_dir = req.sort_dir.as_deref().unwrap_or(match sort_by {
-            "confidence" => "desc",
-            _ => "asc",
-        });
-        filtered.sort_by(|a, b| match sort_by {
-            "confidence" => a
-                .confidence
-                .partial_cmp(&b.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            "source_name" => a.source_full_name.cmp(&b.source_full_name),
-            "target_name" => a.target_full_name.cmp(&b.target_full_name),
-            _ => a.row_id.cmp(&b.row_id),
-        });
-        if sort_dir == "desc" {
-            filtered.reverse();
-        }
-        let total = filtered.len() as u64;
-        let start = (req.page as usize).saturating_mul(req.limit as usize);
-        let end = start.saturating_add(req.limit as usize).min(filtered.len());
-        let rows: Vec<MatchPairDto> = if start >= filtered.len() {
-            Vec::new()
-        } else {
-            filtered[start..end].iter().map(|r| (*r).clone()).collect()
-        };
-        Ok(ResultPageDto {
-            job_id: req.job_id.clone(),
-            page: req.page,
-            limit: req.limit,
-            total,
-            available_levels,
-            level_counts,
-            rows,
-        })
+        page_from_rows(req, &slot.rows)
     }
 
     fn evict_terminal_locked(&self, jobs: &mut HashMap<String, StoredJob>) {
@@ -309,6 +301,264 @@ impl ResultStore {
         for (_, _, job_id) in terminal.into_iter().take(evict_count) {
             jobs.remove(&job_id);
         }
+    }
+}
+
+fn page_from_rows(req: &ResultPageRequestDto, rows: &[MatchPairDto]) -> Result<ResultPageDto> {
+    let base_filtered: Vec<&MatchPairDto> = rows
+        .iter()
+        .filter(|r| match req.min_confidence {
+            Some(min) => r.confidence >= min,
+            None => true,
+        })
+        .filter(|r| match req.query.as_deref() {
+            Some(q) if !q.trim().is_empty() => {
+                let q = q.to_lowercase();
+                r.source_full_name.to_lowercase().contains(&q)
+                    || r.target_full_name.to_lowercase().contains(&q)
+            }
+            _ => true,
+        })
+        .collect();
+
+    let mut level_counts: BTreeMap<u8, u64> = BTreeMap::new();
+    for row in &base_filtered {
+        if let Some(level) = row.matched_at_level {
+            *level_counts.entry(level).or_insert(0) += 1;
+        }
+    }
+    let available_levels = level_counts.keys().copied().collect();
+
+    let mut filtered: Vec<&MatchPairDto> = if req.levels.is_empty() {
+        base_filtered
+    } else {
+        base_filtered
+            .into_iter()
+            .filter(|row| {
+                row.matched_at_level
+                    .map(|level| req.levels.contains(&level))
+                    .unwrap_or(false)
+            })
+            .collect()
+    };
+
+    let sort_by = req.sort_by.as_deref().unwrap_or("row_id");
+    let sort_dir = req.sort_dir.as_deref().unwrap_or(match sort_by {
+        "confidence" => "desc",
+        _ => "asc",
+    });
+    filtered.sort_by(|a, b| match sort_by {
+        "confidence" => a
+            .confidence
+            .partial_cmp(&b.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        "source_name" => a.source_full_name.cmp(&b.source_full_name),
+        "target_name" => a.target_full_name.cmp(&b.target_full_name),
+        _ => a.row_id.cmp(&b.row_id),
+    });
+    if sort_dir == "desc" {
+        filtered.reverse();
+    }
+    let total = filtered.len() as u64;
+    let start = (req.page as usize).saturating_mul(req.limit as usize);
+    let end = start.saturating_add(req.limit as usize).min(filtered.len());
+    let page_rows = if start >= filtered.len() {
+        Vec::new()
+    } else {
+        filtered[start..end].iter().map(|r| (*r).clone()).collect()
+    };
+    Ok(ResultPageDto {
+        job_id: req.job_id.clone(),
+        page: req.page,
+        limit: req.limit,
+        total,
+        available_levels,
+        level_counts,
+        rows: page_rows,
+    })
+}
+
+struct SqliteStore {
+    conn: Mutex<Connection>,
+}
+
+impl SqliteStore {
+    fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "busy_timeout", 5_000i64)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS schema_version (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_version(key, value) VALUES ('result_store', 1);
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                algorithm TEXT NOT NULL,
+                started_at_unix_ms INTEGER NOT NULL,
+                finished_at_unix_ms INTEGER,
+                matches_found INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS results (
+                job_id TEXT NOT NULL,
+                row_id INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                matched_at_level INTEGER,
+                row_json TEXT NOT NULL,
+                PRIMARY KEY (job_id, row_id),
+                FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_results_job_confidence ON results(job_id, confidence);
+            CREATE INDEX IF NOT EXISTS idx_results_job_level ON results(job_id, matched_at_level);
+            CREATE TABLE IF NOT EXISTS result_person_lookup (
+                job_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                person_id INTEGER NOT NULL,
+                person_json TEXT NOT NULL,
+                PRIMARY KEY (job_id, side, person_id),
+                FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS decisions (
+                job_id TEXT NOT NULL,
+                row_id INTEGER NOT NULL,
+                decision TEXT NOT NULL,
+                note TEXT,
+                updated_at_unix_ms INTEGER NOT NULL,
+                PRIMARY KEY (job_id, row_id),
+                FOREIGN KEY (job_id, row_id) REFERENCES results(job_id, row_id) ON DELETE CASCADE
+            );
+            "#,
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn save_job(&self, job: &StoredJob) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO jobs(job_id, summary_json, state, algorithm, started_at_unix_ms, finished_at_unix_ms, matches_found) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                job.summary.job_id,
+                serde_json::to_string(&job.summary)?,
+                serde_json::to_string(&job.summary.state)?,
+                serde_json::to_string(&job.summary.algorithm)?,
+                job.summary.started_at_unix_ms as i64,
+                job.summary.finished_at_unix_ms.map(|v| v as i64),
+                job.summary.matches_found as i64,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM results WHERE job_id = ?1",
+            params![job.summary.job_id],
+        )?;
+        for row in &job.rows {
+            tx.execute(
+                "INSERT INTO results(job_id, row_id, confidence, matched_at_level, row_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    job.summary.job_id,
+                    row.row_id as i64,
+                    row.confidence,
+                    row.matched_at_level.map(i64::from),
+                    serde_json::to_string(row)?,
+                ],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM result_person_lookup WHERE job_id = ?1",
+            params![job.summary.job_id],
+        )?;
+        for (side, people) in [
+            ("source", &job.source_people),
+            ("target", &job.target_people),
+        ] {
+            for person in people {
+                tx.execute(
+                    "INSERT INTO result_person_lookup(job_id, side, person_id, person_json) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        job.summary.job_id,
+                        side,
+                        person.id,
+                        serde_json::to_string(person)?,
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn load_summary(&self, job_id: &str) -> Result<Option<JobSummaryDto>> {
+        self.conn
+            .lock()
+            .query_row(
+                "SELECT summary_json FROM jobs WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
+    }
+
+    fn list_summaries(&self) -> Result<Vec<JobSummaryDto>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT summary_json FROM jobs ORDER BY started_at_unix_ms DESC")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .collect()
+    }
+
+    fn load_job(&self, job_id: &str) -> Result<Option<StoredJob>> {
+        let Some(summary) = self.load_summary(job_id)? else {
+            return Ok(None);
+        };
+        let conn = self.conn.lock();
+        let mut rows_stmt =
+            conn.prepare("SELECT row_json FROM results WHERE job_id = ?1 ORDER BY row_id ASC")?;
+        let rows = rows_stmt
+            .query_map(params![job_id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .collect::<Result<Vec<MatchPairDto>>>()?;
+        let load_people = |side: &str| -> Result<Vec<Person>> {
+            let mut stmt = conn.prepare(
+                "SELECT person_json FROM result_person_lookup WHERE job_id = ?1 AND side = ?2 ORDER BY person_id ASC",
+            )?;
+            stmt.query_map(params![job_id, side], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|json| serde_json::from_str(&json).map_err(Into::into))
+                .collect()
+        };
+        Ok(Some(StoredJob {
+            summary,
+            rows,
+            source_people: load_people("source")?,
+            target_people: load_people("target")?,
+            last_accessed_unix_ms: now_ms(),
+        }))
+    }
+
+    fn delete_job(&self, job_id: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .execute("DELETE FROM jobs WHERE job_id = ?1", params![job_id])?;
+        Ok(())
     }
 }
 
@@ -362,6 +612,10 @@ mod tests {
             matched_at_level: None,
             match_method: None,
         }
+    }
+
+    fn sqlite_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("nm_result_store_{name}_{}.sqlite3", now_ms()))
     }
 
     #[test]
@@ -756,5 +1010,119 @@ mod tests {
             assert_eq!(thread.join().unwrap(), 5);
         }
         assert!(store.summary("job").is_some());
+    }
+
+    #[test]
+    fn sqlite_store_reloads_completed_job_after_restart() {
+        let path = sqlite_path("reload");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve(
+            "persisted".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            10,
+        );
+        store
+            .set_rows(
+                "persisted",
+                vec![mk_pair(0, 99.0, "Ana Santos", "Ana Santos")],
+            )
+            .unwrap();
+        store.mark_finished("persisted", 1, 2_010);
+        drop(store);
+
+        let reloaded = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        let summary = reloaded.summary("persisted").unwrap();
+        assert_eq!(summary.matches_found, 1);
+        assert_eq!(summary.state, JobStateDto::Completed);
+
+        let page = reloaded
+            .page(&ResultPageRequestDto {
+                job_id: "persisted".into(),
+                page: 0,
+                limit: 10,
+                min_confidence: None,
+                query: None,
+                sort_by: None,
+                sort_dir: None,
+                levels: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].source_full_name, "Ana Santos");
+    }
+
+    #[test]
+    fn sqlite_store_pages_evicted_jobs() {
+        let path = sqlite_path("evicted");
+        let store =
+            ResultStore::with_sqlite_path(ResultStoreConfig { max_retained: 1 }, &path).unwrap();
+        for (idx, job_id) in ["old", "new"].into_iter().enumerate() {
+            let started_at = (idx + 1) as u64;
+            store.reserve(
+                job_id.into(),
+                AlgorithmDto::Fuzzy,
+                "source".into(),
+                "target".into(),
+                started_at,
+            );
+            store
+                .set_rows(job_id, vec![mk_pair(0, 91.0, job_id, "target")])
+                .unwrap();
+            store.mark_finished(job_id, 1, started_at + 10);
+        }
+
+        assert!(store.inner.lock().get("old").is_none());
+        assert!(store.summary("old").is_some());
+        let page = store
+            .page(&ResultPageRequestDto {
+                job_id: "old".into(),
+                page: 0,
+                limit: 10,
+                min_confidence: None,
+                query: None,
+                sort_by: None,
+                sort_dir: None,
+                levels: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(page.rows[0].source_full_name, "old");
+    }
+
+    #[test]
+    fn sqlite_forget_job_removes_persisted_job() {
+        let path = sqlite_path("forget");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve(
+            "gone".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            1,
+        );
+        store
+            .set_rows("gone", vec![mk_pair(0, 95.0, "a", "b")])
+            .unwrap();
+        store.mark_finished("gone", 1, 2);
+        assert!(store.forget_job("gone").unwrap().is_some());
+        drop(store);
+
+        let reloaded = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        assert!(reloaded.summary("gone").is_none());
+        assert!(
+            reloaded
+                .page(&ResultPageRequestDto {
+                    job_id: "gone".into(),
+                    page: 0,
+                    limit: 10,
+                    min_confidence: None,
+                    query: None,
+                    sort_by: None,
+                    sort_dir: None,
+                    levels: Vec::new(),
+                })
+                .is_err()
+        );
     }
 }
