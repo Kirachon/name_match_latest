@@ -1,18 +1,37 @@
 import { useConnectionStore } from "@/shared/stores/connectionStore";
 import { Button, Card, SectionHeader } from "@/shared/components/primitives";
 import { ConnectionCard } from "./ConnectionCard";
+import { DataSourceSwitcher } from "./DataSourceSwitcher";
+import { FileSourceCard } from "./FileSourceCard";
 
 export function ConnectTab({ onAdvance }: { onAdvance: () => void }) {
+  const sourceMode = useConnectionStore((s) => s.source.mode);
+  const targetMode = useConnectionStore((s) => s.target.mode);
+
   return (
     <div className="grid lg:grid-cols-2 gap-5">
-      <ConnectionCard side="source" />
-      <ConnectionCard side="target" />
+      <div className="space-y-3">
+        <DataSourceSwitcher side="source" />
+        {sourceMode === "database" ? (
+          <ConnectionCard side="source" />
+        ) : (
+          <FileSourceCard side="source" />
+        )}
+      </div>
+      <div className="space-y-3">
+        <DataSourceSwitcher side="target" />
+        {targetMode === "database" ? (
+          <ConnectionCard side="target" />
+        ) : (
+          <FileSourceCard side="target" />
+        )}
+      </div>
       <Card className="lg:col-span-2 dot-grid relative overflow-hidden">
         <div className="relative z-10 flex items-center justify-between gap-4">
           <div>
             <SectionHeader
               title="Workflow"
-              description="Connect both databases, then pick the source and target tables. The Configure tab unlocks once schemas are verified."
+              description="Connect databases or preview CSV files, then map columns before configuring the run."
             />
             <ul className="text-sm text-ink-300 list-disc list-inside marker:text-accent-500 space-y-1">
               <li>
@@ -20,9 +39,8 @@ export function ConnectTab({ onAdvance }: { onAdvance: () => void }) {
               </li>
               <li>Row counts are estimates — they’re cached per session.</li>
               <li>
-                Passwords are dropped from memory after the pool is built. Saved
-                passwords (opt-in) are stored unencrypted in the app data
-                directory.
+                CSV import preview supports encoding, delimiter, and date-format
+                overrides.
               </li>
             </ul>
           </div>
@@ -37,6 +55,8 @@ function ContinueButton({ onAdvance }: { onAdvance: () => void }) {
   const source = useConnectionStore((s) => s.source);
   const target = useConnectionStore((s) => s.target);
   const ready =
+    source.mode === "database" &&
+    target.mode === "database" &&
     !!source.session &&
     !!source.selectedTable &&
     !!target.session &&
@@ -51,7 +71,7 @@ function ContinueButton({ onAdvance }: { onAdvance: () => void }) {
       title={
         ready
           ? "Move to Configure"
-          : "Connect both databases and pick tables first"
+          : "Database runs are ready now; CSV run wiring is next"
       }
     >
       Continue to Configure

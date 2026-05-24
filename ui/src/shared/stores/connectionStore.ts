@@ -1,30 +1,58 @@
 import { create } from "zustand";
 import type {
   ColumnMappingDto,
+  CsvDelimiterDto,
+  CsvEncodingDto,
+  CsvPreviewDto,
   DbSessionDto,
   TableColumnsDto,
   TableInfoDto,
 } from "@/shared/tauri/types";
 
 export type SessionSide = "source" | "target";
+export type DataSourceMode = "database" | "file";
+
+export interface FileSourceState {
+  path: string;
+  preview: CsvPreviewDto | null;
+  loading: boolean;
+  error: string | null;
+  encoding: CsvEncodingDto | null;
+  delimiter: CsvDelimiterDto | null;
+  dateFormat: string;
+}
 
 interface SideState {
+  mode: DataSourceMode;
   session: DbSessionDto | null;
   tables: TableInfoDto[];
   selectedTable: string | null;
   columnMapping: ColumnMappingDto | null;
   columns: TableColumnsDto | null;
+  file: FileSourceState;
   rowCount: number | null;
   loading: boolean;
   error: string | null;
 }
 
+const emptyFile: FileSourceState = {
+  path: "",
+  preview: null,
+  loading: false,
+  error: null,
+  encoding: null,
+  delimiter: null,
+  dateFormat: "%Y-%m-%d",
+};
+
 const emptySide: SideState = {
+  mode: "database",
   session: null,
   tables: [],
   selectedTable: null,
   columnMapping: null,
   columns: null,
+  file: { ...emptyFile },
   rowCount: null,
   loading: false,
   error: null,
@@ -33,6 +61,7 @@ const emptySide: SideState = {
 interface ConnectionStore {
   source: SideState;
   target: SideState;
+  setMode: (side: SessionSide, mode: DataSourceMode) => void;
   setLoading: (side: SessionSide, loading: boolean) => void;
   setError: (side: SessionSide, error: string | null) => void;
   setSession: (side: SessionSide, session: DbSessionDto | null) => void;
@@ -43,6 +72,7 @@ interface ConnectionStore {
     mapping: ColumnMappingDto | null,
   ) => void;
   setColumns: (side: SessionSide, columns: TableColumnsDto | null) => void;
+  setFileSource: (side: SessionSide, patch: Partial<FileSourceState>) => void;
   setRowCount: (side: SessionSide, count: number | null) => void;
   resetSide: (side: SessionSide) => void;
   reset: () => void;
@@ -51,6 +81,27 @@ interface ConnectionStore {
 export const useConnectionStore = create<ConnectionStore>((set) => ({
   source: { ...emptySide },
   target: { ...emptySide },
+  setMode: (side, mode) =>
+    set(
+      (s) =>
+        ({
+          [side]: {
+            ...s[side],
+            mode,
+            error: null,
+            ...(mode === "database"
+              ? { file: { ...emptyFile } }
+              : {
+                  session: null,
+                  tables: [],
+                  selectedTable: null,
+                  columnMapping: null,
+                  columns: null,
+                  rowCount: null,
+                }),
+          },
+        }) as Partial<ConnectionStore>,
+    ),
   setLoading: (side, loading) =>
     set(
       (s) => ({ [side]: { ...s[side], loading } }) as Partial<ConnectionStore>,
@@ -90,6 +141,13 @@ export const useConnectionStore = create<ConnectionStore>((set) => ({
     set(
       (s) => ({ [side]: { ...s[side], columns } }) as Partial<ConnectionStore>,
     ),
+  setFileSource: (side, patch) =>
+    set(
+      (s) =>
+        ({
+          [side]: { ...s[side], file: { ...s[side].file, ...patch } },
+        }) as Partial<ConnectionStore>,
+    ),
   setRowCount: (side, rowCount) =>
     set(
       (s) => ({ [side]: { ...s[side], rowCount } }) as Partial<ConnectionStore>,
@@ -104,6 +162,16 @@ export function readinessForRun(state: ConnectionStore): {
   ready: boolean;
   reason: string | null;
 } {
+  if (state.source.mode === "file")
+    return {
+      ready: false,
+      reason: "CSV preview is ready; CSV matching is being wired next",
+    };
+  if (state.target.mode === "file")
+    return {
+      ready: false,
+      reason: "CSV preview is ready; CSV matching is being wired next",
+    };
   if (!state.source.session)
     return { ready: false, reason: "Connect a source database" };
   if (!state.source.selectedTable)
