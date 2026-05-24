@@ -27,11 +27,48 @@ const ColumnMappingSchema = z.object({
   hh_id: z.string().min(1).nullable().optional(),
 });
 
-const TableSelectionSchema = z.object({
-  session_id: z.string().min(1, "Connect to a database first"),
-  table: z.string().min(1, "Select a table"),
-  column_mapping: ColumnMappingSchema.nullable().optional(),
+const FileSelectionSchema = z.object({
+  path: z.string().min(1, "Choose a CSV file"),
+  encoding: z
+    .enum(["utf8", "utf8-bom", "windows1252", "latin1"])
+    .nullable()
+    .optional(),
+  delimiter: z.enum(["comma", "semicolon", "tab"]).nullable().optional(),
+  date_format: z.string().nullable().optional(),
 });
+
+const TableSelectionSchema = z
+  .object({
+    source_kind: z.enum(["database", "file"]).default("database"),
+    session_id: z.string().optional().default(""),
+    table: z.string().optional().default(""),
+    column_mapping: ColumnMappingSchema.nullable().optional(),
+    file: FileSelectionSchema.nullable().optional(),
+  })
+  .superRefine((selection, ctx) => {
+    if (selection.source_kind === "database") {
+      if (!selection.session_id) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["session_id"],
+          message: "Connect to a database first",
+        });
+      }
+      if (!selection.table) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["table"],
+          message: "Select a table",
+        });
+      }
+    } else if (!selection.file?.path) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["file", "path"],
+        message: "Choose a CSV file",
+      });
+    }
+  });
 
 const GpuOptionsSchema = z.object({
   mode: z.enum(["cpu", "auto", "force-gpu"]),

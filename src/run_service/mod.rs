@@ -325,8 +325,8 @@ impl RunService {
         store.reserve(
             job_id.clone(),
             config.algorithm,
-            config.source.table.clone(),
-            config.target.table.clone(),
+            selection_label(&config.source),
+            selection_label(&config.target),
             started_at_unix_ms,
         );
 
@@ -366,6 +366,17 @@ impl RunService {
         });
         registry.insert(Arc::clone(&handle));
         handle
+    }
+}
+
+fn selection_label(selection: &TableSelectionDto) -> String {
+    match selection.source_kind {
+        DataSourceKindDto::Database => selection.table.clone(),
+        DataSourceKindDto::File => selection
+            .file
+            .as_ref()
+            .map(|file| file.path.clone())
+            .unwrap_or_else(|| "csv".to_string()),
     }
 }
 

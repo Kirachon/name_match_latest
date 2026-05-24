@@ -1,7 +1,9 @@
+use crate::models::{ColumnMapping, Person};
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 const PREVIEW_LIMIT: usize = 5;
@@ -149,6 +151,95 @@ pub fn load_csv_preview(request: &CsvPreviewRequestDto) -> Result<CsvPreviewDto>
     })
 }
 
+pub fn load_csv_people(
+    request: &CsvPreviewRequestDto,
+    mapping: Option<&ColumnMapping>,
+) -> Result<Vec<Person>> {
+    let path = Path::new(&request.path);
+    if !path.is_file() {
+        bail!("CSV file not found: {}", request.path);
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", request.path))?;
+    let encoding = request
+        .encoding
+        .clone()
+        .unwrap_or_else(|| detect_encoding(&bytes));
+    let text = decode_bytes(&bytes, &encoding)?;
+    let delimiter = request
+        .delimiter
+        .clone()
+        .unwrap_or_else(|| detect_delimiter(&text));
+    let date_format = request
+        .date_format
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "%Y-%m-%d".to_string());
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter.byte())
+        .flexible(true)
+        .from_reader(text.as_bytes());
+    let headers = reader
+        .headers()
+        .context("CSV file has no readable header row")?
+        .iter()
+        .map(|v| v.trim().to_string())
+        .collect::<Vec<_>>();
+    validate_headers(&headers, &mut Vec::new())?;
+    let mapping = mapping.cloned().unwrap_or_else(|| infer_mapping(&headers));
+    if !mapping.required_ok() {
+        bail!("CSV column mapping is missing id, first_name, last_name, or birthdate");
+    }
+    let mut people = Vec::new();
+    for record in reader.records() {
+        let record = record.context("Failed to parse CSV row")?;
+        let row = headers
+            .iter()
+            .zip(record.iter())
+            .map(|(header, value)| (header.as_str(), value.trim()))
+            .collect::<HashMap<_, _>>();
+        let id_text = value_for(&row, &mapping.id).unwrap_or("0");
+        let id = id_text
+            .parse::<i64>()
+            .with_context(|| format!("Invalid CSV id value '{}'", id_text))?;
+        let birthdate = value_for(&row, &mapping.birthdate)
+            .filter(|v| !v.is_empty())
+            .map(|value| NaiveDate::parse_from_str(value, &date_format))
+            .transpose()
+            .with_context(|| format!("Invalid CSV birthdate for id {}", id))?;
+
+        let mapped_columns = mapped_column_names(&mapping);
+        let mut extra_fields = HashMap::new();
+        for (header, value) in &row {
+            if !mapped_columns.contains(*header) {
+                extra_fields.insert((*header).to_string(), (*value).to_string());
+            }
+        }
+        people.push(Person {
+            id,
+            uuid: mapping
+                .uuid
+                .as_ref()
+                .and_then(|name| value_for(&row, name))
+                .map(str::to_string),
+            first_name: value_for(&row, &mapping.first_name).map(str::to_string),
+            middle_name: mapping
+                .middle_name
+                .as_ref()
+                .and_then(|name| value_for(&row, name))
+                .map(str::to_string),
+            last_name: value_for(&row, &mapping.last_name).map(str::to_string),
+            birthdate,
+            hh_id: mapping
+                .hh_id
+                .as_ref()
+                .and_then(|name| value_for(&row, name))
+                .map(str::to_string),
+            extra_fields,
+        });
+    }
+    Ok(people)
+}
+
 fn detect_encoding(bytes: &[u8]) -> CsvEncodingDto {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return CsvEncodingDto::Utf8Bom;
@@ -209,6 +300,70 @@ fn validate_headers(headers: &[String], warnings: &mut Vec<String>) -> Result<()
         }
     }
     Ok(())
+}
+
+fn infer_mapping(headers: &[String]) -> ColumnMapping {
+    ColumnMapping {
+        id: pick(headers, &["id", "person_id", "beneficiary_id"]),
+        uuid: optional_pick(headers, &["uuid"]),
+        first_name: pick(headers, &["first_name", "firstname", "fname", "given_name"]),
+        middle_name: optional_pick(headers, &["middle_name", "middlename", "mname"]),
+        last_name: pick(headers, &["last_name", "lastname", "lname", "surname"]),
+        birthdate: pick(headers, &["birthdate", "birth_date", "birthday", "dob"]),
+        hh_id: optional_pick(headers, &["hh_id", "household_id"]),
+    }
+}
+
+fn pick(headers: &[String], hints: &[&str]) -> String {
+    optional_pick(headers, hints).unwrap_or_default()
+}
+
+fn optional_pick(headers: &[String], hints: &[&str]) -> Option<String> {
+    let normalized = headers
+        .iter()
+        .map(|header| (normalize(header), header.clone()))
+        .collect::<HashMap<_, _>>();
+    for hint in hints {
+        if let Some(header) = normalized.get(&normalize(hint)) {
+            return Some(header.clone());
+        }
+    }
+    for hint in hints {
+        if let Some(header) = headers
+            .iter()
+            .find(|header| normalize(header).contains(&normalize(hint)))
+        {
+            return Some(header.clone());
+        }
+    }
+    None
+}
+
+fn normalize(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn value_for<'a>(row: &'a HashMap<&str, &str>, column: &str) -> Option<&'a str> {
+    row.get(column).copied().filter(|value| !value.is_empty())
+}
+
+fn mapped_column_names(mapping: &ColumnMapping) -> std::collections::HashSet<&str> {
+    [
+        Some(mapping.id.as_str()),
+        mapping.uuid.as_deref(),
+        Some(mapping.first_name.as_str()),
+        mapping.middle_name.as_deref(),
+        Some(mapping.last_name.as_str()),
+        Some(mapping.birthdate.as_str()),
+        mapping.hh_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn has_formula_injection_risk(text: &str) -> bool {
@@ -285,5 +440,30 @@ mod tests {
         })
         .unwrap();
         assert!(preview.warnings.iter().any(|w| w.contains("formula")));
+    }
+
+    #[test]
+    fn loads_people_from_csv_with_mapping() {
+        let path = write_fixture(
+            "people",
+            b"person_id,given_name,surname,dob,note\n1,Ana,Santos,1990-01-02,ok\n",
+        );
+        let people = load_csv_people(
+            &CsvPreviewRequestDto {
+                path,
+                encoding: None,
+                delimiter: None,
+                date_format: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].id, 1);
+        assert_eq!(people[0].first_name.as_deref(), Some("Ana"));
+        assert_eq!(
+            people[0].extra_fields.get("note").map(String::as_str),
+            Some("ok")
+        );
     }
 }

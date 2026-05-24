@@ -8,6 +8,7 @@ import { useConfigStore } from "@/shared/stores/configStore";
 import { useJobStore } from "@/shared/stores/jobStore";
 import { useToastStore } from "@/shared/stores/toastStore";
 import { cancelMatching, startMatching } from "@/shared/tauri/commands";
+import type { TableSelectionDto } from "@/shared/tauri/types";
 import { parseRunConfig } from "@/shared/tauri/zod-schemas";
 
 interface ShortcutOpts {
@@ -128,16 +129,8 @@ async function triggerStart(
   const srcRaw = connState.source.columns?.raw_columns ?? [];
   const tgtRaw = connState.target.columns?.raw_columns ?? [];
   const draft = cfgState.buildRunConfig(
-    {
-      session_id: connState.source.session!.session_id,
-      table: connState.source.selectedTable!,
-      column_mapping: connState.source.columnMapping,
-    },
-    {
-      session_id: connState.target.session!.session_id,
-      table: connState.target.selectedTable!,
-      column_mapping: connState.target.columnMapping,
-    },
+    selectionFromSide(connState.source),
+    selectionFromSide(connState.target),
     {
       hasBarangay:
         srcRaw.includes("barangay_code") && tgtRaw.includes("barangay_code"),
@@ -175,4 +168,29 @@ async function triggerStart(
       ttlMs: null,
     });
   }
+}
+
+function selectionFromSide(
+  side: ReturnType<typeof useConnectionStore.getState>["source"],
+): TableSelectionDto {
+  if (side.mode === "file") {
+    return {
+      source_kind: "file",
+      session_id: "",
+      table: "",
+      column_mapping: side.columnMapping,
+      file: {
+        path: side.file.path,
+        encoding: side.file.encoding,
+        delimiter: side.file.delimiter,
+        date_format: side.file.dateFormat,
+      },
+    };
+  }
+  return {
+    source_kind: "database",
+    session_id: side.session!.session_id,
+    table: side.selectedTable!,
+    column_mapping: side.columnMapping,
+  };
 }

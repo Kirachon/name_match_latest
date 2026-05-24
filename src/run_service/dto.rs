@@ -160,11 +160,41 @@ pub struct TableColumnsDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DataSourceKindDto {
+    Database,
+    File,
+}
+
+impl Default for DataSourceKindDto {
+    fn default() -> Self {
+        Self::Database
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSelectionDto {
+    pub path: String,
+    #[serde(default)]
+    pub encoding: Option<crate::loaders::csv_loader::CsvEncodingDto>,
+    #[serde(default)]
+    pub delimiter: Option<crate::loaders::csv_loader::CsvDelimiterDto>,
+    #[serde(default)]
+    pub date_format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSelectionDto {
+    #[serde(default)]
+    pub source_kind: DataSourceKindDto,
+    #[serde(default)]
     pub session_id: String,
+    #[serde(default)]
     pub table: String,
     #[serde(default)]
     pub column_mapping: Option<ColumnMappingDto>,
+    #[serde(default)]
+    pub file: Option<FileSelectionDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -27,6 +27,7 @@ export type RunModeDto = "auto" | "streaming" | "in-memory";
 export type ExportFormatDto = "csv" | "xlsx" | "both";
 export type CsvEncodingDto = "utf8" | "utf8-bom" | "windows1252" | "latin1";
 export type CsvDelimiterDto = "comma" | "semicolon" | "tab";
+export type DataSourceKindDto = "database" | "file";
 
 /* ---------- Database ---------- */
 
@@ -75,12 +76,21 @@ export interface ColumnMappingDto {
 }
 
 export interface TableSelectionDto {
+  source_kind?: DataSourceKindDto;
   session_id: string;
   table: string;
   column_mapping?: ColumnMappingDto | null;
+  file?: FileSelectionDto | null;
 }
 
 export interface CsvPreviewRequestDto {
+  path: string;
+  encoding?: CsvEncodingDto | null;
+  delimiter?: CsvDelimiterDto | null;
+  date_format?: string | null;
+}
+
+export interface FileSelectionDto {
   path: string;
   encoding?: CsvEncodingDto | null;
   delimiter?: CsvDelimiterDto | null;

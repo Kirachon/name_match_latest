@@ -35,6 +35,7 @@ import type {
   JobStateDto,
   LogEntryDto,
   PipelineStageDto,
+  TableSelectionDto,
 } from "@/shared/tauri/types";
 
 const STAGES: Array<{ id: PipelineStageDto; label: string }> = [
@@ -76,16 +77,8 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
     const srcRaw = conn.source.columns?.raw_columns ?? [];
     const tgtRaw = conn.target.columns?.raw_columns ?? [];
     const draft = cfg.buildRunConfig(
-      {
-        session_id: conn.source.session!.session_id,
-        table: conn.source.selectedTable!,
-        column_mapping: conn.source.columnMapping,
-      },
-      {
-        session_id: conn.target.session!.session_id,
-        table: conn.target.selectedTable!,
-        column_mapping: conn.target.columnMapping,
-      },
+      selectionFromSide(conn.source),
+      selectionFromSide(conn.target),
       {
         hasBarangay:
           srcRaw.includes("barangay_code") && tgtRaw.includes("barangay_code"),
@@ -342,6 +335,31 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
       </div>
     </div>
   );
+}
+
+function selectionFromSide(
+  side: ReturnType<typeof useConnectionStore.getState>["source"],
+): TableSelectionDto {
+  if (side.mode === "file") {
+    return {
+      source_kind: "file",
+      session_id: "",
+      table: "",
+      column_mapping: side.columnMapping,
+      file: {
+        path: side.file.path,
+        encoding: side.file.encoding,
+        delimiter: side.file.delimiter,
+        date_format: side.file.dateFormat,
+      },
+    };
+  }
+  return {
+    source_kind: "database",
+    session_id: side.session!.session_id,
+    table: side.selectedTable!,
+    column_mapping: side.columnMapping,
+  };
 }
 
 function PipelineRow({

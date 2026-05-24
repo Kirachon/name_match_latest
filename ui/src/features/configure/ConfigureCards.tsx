@@ -595,10 +595,8 @@ export function SummaryCard({ onAdvance }: { onAdvance: () => void }) {
   const target = useConnectionStore((s) => s.target);
 
   const ready =
-    !!source.session &&
-    !!source.selectedTable &&
-    !!target.session &&
-    !!target.selectedTable &&
+    isSideReady(source) &&
+    isSideReady(target) &&
     ex.output_directory.trim().length > 0;
 
   const [open, setOpen] = useState(true);
@@ -644,25 +642,33 @@ export function SummaryCard({ onAdvance }: { onAdvance: () => void }) {
           <Row
             label="Source"
             value={
-              source.session && source.selectedTable
-                ? `${source.session.database}.${source.selectedTable}${
-                    source.rowCount != null
-                      ? ` (${formatNumber(source.rowCount)} rows)`
-                      : ""
-                  }`
-                : "-"
+              source.mode === "file"
+                ? source.file.preview
+                  ? `${source.file.path} (${formatNumber(source.file.preview.total_preview_rows)} preview rows)`
+                  : "-"
+                : source.session && source.selectedTable
+                  ? `${source.session.database}.${source.selectedTable}${
+                      source.rowCount != null
+                        ? ` (${formatNumber(source.rowCount)} rows)`
+                        : ""
+                    }`
+                  : "-"
             }
           />
           <Row
             label="Target"
             value={
-              target.session && target.selectedTable
-                ? `${target.session.database}.${target.selectedTable}${
-                    target.rowCount != null
-                      ? ` (${formatNumber(target.rowCount)} rows)`
-                      : ""
-                  }`
-                : "-"
+              target.mode === "file"
+                ? target.file.preview
+                  ? `${target.file.path} (${formatNumber(target.file.preview.total_preview_rows)} preview rows)`
+                  : "-"
+                : target.session && target.selectedTable
+                  ? `${target.session.database}.${target.selectedTable}${
+                      target.rowCount != null
+                        ? ` (${formatNumber(target.rowCount)} rows)`
+                        : ""
+                    }`
+                  : "-"
             }
           />
           <Row
@@ -709,6 +715,14 @@ function Row({ label, value }: { label: string; value: string }) {
       <dd className="text-ink-100 truncate">{value}</dd>
     </div>
   );
+}
+
+function isSideReady(
+  side: ReturnType<typeof useConnectionStore.getState>["source"],
+) {
+  return side.mode === "file"
+    ? !!side.file.preview && !!side.columnMapping
+    : !!side.session && !!side.selectedTable;
 }
 
 function labelMode(m: ComputeModeDto) {

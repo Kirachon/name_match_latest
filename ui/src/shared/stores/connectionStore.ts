@@ -162,23 +162,21 @@ export function readinessForRun(state: ConnectionStore): {
   ready: boolean;
   reason: string | null;
 } {
-  if (state.source.mode === "file")
-    return {
-      ready: false,
-      reason: "CSV preview is ready; CSV matching is being wired next",
-    };
-  if (state.target.mode === "file")
-    return {
-      ready: false,
-      reason: "CSV preview is ready; CSV matching is being wired next",
-    };
-  if (!state.source.session)
+  if (state.source.mode === "file" && !state.source.file.preview)
+    return { ready: false, reason: "Preview a source CSV file" };
+  if (state.source.mode === "file" && !state.source.columnMapping)
+    return { ready: false, reason: "Map the source CSV columns" };
+  if (state.target.mode === "file" && !state.target.file.preview)
+    return { ready: false, reason: "Preview a target CSV file" };
+  if (state.target.mode === "file" && !state.target.columnMapping)
+    return { ready: false, reason: "Map the target CSV columns" };
+  if (state.source.mode === "database" && !state.source.session)
     return { ready: false, reason: "Connect a source database" };
-  if (!state.source.selectedTable)
+  if (state.source.mode === "database" && !state.source.selectedTable)
     return { ready: false, reason: "Select a source table" };
-  if (!state.target.session)
+  if (state.target.mode === "database" && !state.target.session)
     return { ready: false, reason: "Connect a target database" };
-  if (!state.target.selectedTable)
+  if (state.target.mode === "database" && !state.target.selectedTable)
     return { ready: false, reason: "Select a target table" };
   return { ready: true, reason: null };
 }

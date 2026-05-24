@@ -1,4 +1,7 @@
-import { useConnectionStore } from "@/shared/stores/connectionStore";
+import {
+  readinessForRun,
+  useConnectionStore,
+} from "@/shared/stores/connectionStore";
 import { Button, Card, SectionHeader } from "@/shared/components/primitives";
 import { ConnectionCard } from "./ConnectionCard";
 import { DataSourceSwitcher } from "./DataSourceSwitcher";
@@ -52,15 +55,7 @@ export function ConnectTab({ onAdvance }: { onAdvance: () => void }) {
 }
 
 function ContinueButton({ onAdvance }: { onAdvance: () => void }) {
-  const source = useConnectionStore((s) => s.source);
-  const target = useConnectionStore((s) => s.target);
-  const ready =
-    source.mode === "database" &&
-    target.mode === "database" &&
-    !!source.session &&
-    !!source.selectedTable &&
-    !!target.session &&
-    !!target.selectedTable;
+  const { ready, reason } = useConnectionStore(readinessForRun);
 
   return (
     <Button
@@ -71,7 +66,7 @@ function ContinueButton({ onAdvance }: { onAdvance: () => void }) {
       title={
         ready
           ? "Move to Configure"
-          : "Database runs are ready now; CSV run wiring is next"
+          : (reason ?? "Finish source and target setup first")
       }
     >
       Continue to Configure

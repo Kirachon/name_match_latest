@@ -13,10 +13,13 @@ import {
   SectionHeader,
 } from "@/shared/components/primitives";
 import type {
+  ColumnMappingDto,
   CsvDelimiterDto,
   CsvEncodingDto,
   CsvPreviewDto,
+  TableColumnsDto,
 } from "@/shared/tauri/types";
+import { ColumnMapper } from "./ColumnMapper";
 
 const ENCODINGS: Array<{ id: CsvEncodingDto | ""; label: string }> = [
   { id: "", label: "Auto" },
@@ -35,7 +38,9 @@ const DELIMITERS: Array<{ id: CsvDelimiterDto | ""; label: string }> = [
 
 export function FileSourceCard({ side }: { side: SessionSide }) {
   const file = useConnectionStore((s) => s[side].file);
+  const columnMapping = useConnectionStore((s) => s[side].columnMapping);
   const setFileSource = useConnectionStore((s) => s.setFileSource);
+  const setColumnMapping = useConnectionStore((s) => s.setColumnMapping);
   const pushToast = useToastStore((s) => s.push);
 
   async function pickFile() {
@@ -72,6 +77,7 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
         delimiter: result.delimiter,
         dateFormat: result.date_format,
       });
+      setColumnMapping(side, inferColumnMapping(result.headers));
       pushToast({
         tone: "success",
         title: `${sideLabel(side)} CSV preview loaded`,
@@ -186,9 +192,85 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
           {file.error}
         </div>
       )}
-      {file.preview && <PreviewTable preview={file.preview} />}
+      {file.preview && (
+        <>
+          <ColumnMapper
+            columns={columnsFromHeaders(file.preview.headers)}
+            value={columnMapping}
+            onChange={(mapping) => setColumnMapping(side, mapping)}
+          />
+          <PreviewTable preview={file.preview} />
+        </>
+      )}
     </Card>
   );
+}
+
+function columnsFromHeaders(headers: string[]): TableColumnsDto {
+  return {
+    has_id: headers.includes("id"),
+    has_uuid: headers.includes("uuid"),
+    has_first_name: headers.includes("first_name"),
+    has_middle_name: headers.includes("middle_name"),
+    has_last_name: headers.includes("last_name"),
+    has_birthdate: headers.includes("birthdate"),
+    has_hh_id: headers.includes("hh_id"),
+    raw_columns: headers,
+  };
+}
+
+function inferColumnMapping(headers: string[]): ColumnMappingDto | null {
+  const columns = columnsFromHeaders(headers);
+  const id = pick(headers, ["id", "person_id", "beneficiary_id"]);
+  const first_name = pick(headers, [
+    "first_name",
+    "firstname",
+    "fname",
+    "given_name",
+  ]);
+  const last_name = pick(headers, [
+    "last_name",
+    "lastname",
+    "lname",
+    "surname",
+  ]);
+  const birthdate = pick(headers, [
+    "birthdate",
+    "birth_date",
+    "birthday",
+    "dob",
+  ]);
+  if (!id || !first_name || !last_name || !birthdate) return null;
+  return {
+    id,
+    uuid: columns.has_uuid ? "uuid" : null,
+    first_name,
+    middle_name: pick(headers, ["middle_name", "middlename", "mname"]) || null,
+    last_name,
+    birthdate,
+    hh_id: columns.has_hh_id ? "hh_id" : null,
+  };
+}
+
+function pick(headers: string[], hints: string[]): string {
+  const normalized = new Map(
+    headers.map((header) => [normalize(header), header]),
+  );
+  for (const hint of hints) {
+    const found = normalized.get(normalize(hint));
+    if (found) return found;
+  }
+  for (const hint of hints) {
+    const found = headers.find((header) =>
+      normalize(header).includes(normalize(hint)),
+    );
+    if (found) return found;
+  }
+  return "";
+}
+
+function normalize(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function PreviewTable({ preview }: { preview: CsvPreviewDto }) {

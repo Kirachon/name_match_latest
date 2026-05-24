@@ -3,8 +3,11 @@ use crate::error::{AppError, AppResult};
 use crate::state::{AppState, TauriEventSink};
 use name_matcher::db::get_person_rows;
 use name_matcher::db::schema::get_person_rows_mapped;
+use name_matcher::loaders::csv_loader::{load_csv_people, CsvPreviewRequestDto};
 use name_matcher::models::Person;
-use name_matcher::run_service::dto::{JobStateDto, JobSummaryDto, RunConfigDto, TableSelectionDto};
+use name_matcher::run_service::dto::{
+    DataSourceKindDto, JobStateDto, JobSummaryDto, RunConfigDto, TableSelectionDto,
+};
 use name_matcher::run_service::{CancelToken, EventSink, RunService};
 use std::sync::Arc;
 use tauri::State;
@@ -15,19 +18,19 @@ pub async fn start_matching(
     state: State<'_, Arc<AppState>>,
 ) -> AppResult<String> {
     // Validate selection up-front so we never spawn a worker on garbage input.
-    if config.source.session_id.is_empty() || config.source.table.is_empty() {
-        return Err(AppError::Validation("source selection is required".into()));
-    }
-    if config.target.session_id.is_empty() || config.target.table.is_empty() {
-        return Err(AppError::Validation("target selection is required".into()));
-    }
-    if !is_safe_ident(&config.source.table) {
+    validate_selection("source", &config.source)?;
+    validate_selection("target", &config.target)?;
+    if matches!(config.source.source_kind, DataSourceKindDto::Database)
+        && !is_safe_ident(&config.source.table)
+    {
         return Err(AppError::Validation(format!(
             "source table name contains unsafe characters: {}",
             config.source.table
         )));
     }
-    if !is_safe_ident(&config.target.table) {
+    if matches!(config.target.source_kind, DataSourceKindDto::Database)
+        && !is_safe_ident(&config.target.table)
+    {
         return Err(AppError::Validation(format!(
             "target table name contains unsafe characters: {}",
             config.target.table
@@ -39,30 +42,42 @@ pub async fn start_matching(
         return Err(AppError::Validation("output directory is required".into()));
     }
 
-    // Resolve sessions -> pools NOW so the worker thread does not need to
+    // Resolve DB sessions -> pools NOW so the worker thread does not need to
     // hold a State<'_> reference (which is not Send across .await in Tauri).
-    let src_pool = state
-        .db
-        .get(&config.source.session_id)
-        .ok_or_else(|| {
-            AppError::Validation(format!(
-                "source session not found: {}",
-                config.source.session_id
-            ))
-        })?
-        .pool
-        .clone();
-    let tgt_pool = state
-        .db
-        .get(&config.target.session_id)
-        .ok_or_else(|| {
-            AppError::Validation(format!(
-                "target session not found: {}",
-                config.target.session_id
-            ))
-        })?
-        .pool
-        .clone();
+    let src_pool = if matches!(config.source.source_kind, DataSourceKindDto::Database) {
+        Some(
+            state
+                .db
+                .get(&config.source.session_id)
+                .ok_or_else(|| {
+                    AppError::Validation(format!(
+                        "source session not found: {}",
+                        config.source.session_id
+                    ))
+                })?
+                .pool
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let tgt_pool = if matches!(config.target.source_kind, DataSourceKindDto::Database) {
+        Some(
+            state
+                .db
+                .get(&config.target.session_id)
+                .ok_or_else(|| {
+                    AppError::Validation(format!(
+                        "target session not found: {}",
+                        config.target.session_id
+                    ))
+                })?
+                .pool
+                .clone(),
+        )
+    } else {
+        None
+    };
 
     let sink: Arc<dyn EventSink> = Arc::new(TauriEventSink::new(state.app_handle.clone()));
     let registry = Arc::clone(&state.jobs);
@@ -78,33 +93,86 @@ pub async fn start_matching(
               _sink: &dyn EventSink| {
             let src_pool = src_pool.clone();
             let tgt_pool = tgt_pool.clone();
-            let src_table = src.table.clone();
-            let tgt_table = tgt.table.clone();
-            let src_mapping = src.column_mapping.clone();
-            let tgt_mapping = tgt.column_mapping.clone();
+            let src = src.clone();
+            let tgt = tgt.clone();
+            let src_label = selection_label(&src);
+            let tgt_label = selection_label(&tgt);
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
             let (t1, t2): (Vec<Person>, Vec<Person>) = rt.block_on(async move {
-                let t1 = if src_mapping.is_some() {
-                    get_person_rows_mapped(&src_pool, &src_table, src_mapping.as_ref()).await?
-                } else {
-                    get_person_rows(&src_pool, &src_table).await?
-                };
-                let t2 = if tgt_mapping.is_some() {
-                    get_person_rows_mapped(&tgt_pool, &tgt_table, tgt_mapping.as_ref()).await?
-                } else {
-                    get_person_rows(&tgt_pool, &tgt_table).await?
-                };
+                let t1 = load_selection_rows(src_pool.as_ref(), &src).await?;
+                let t2 = load_selection_rows(tgt_pool.as_ref(), &tgt).await?;
                 anyhow::Ok((t1, t2))
             })?;
-            Ok((t1, t2, src.table.clone(), tgt.table.clone()))
+            Ok((t1, t2, src_label, tgt_label))
         },
     );
 
     let handle = RunService::start(config, registry, store, sink, loader);
     Ok(handle.job_id.clone())
+}
+
+fn validate_selection(side: &str, selection: &TableSelectionDto) -> AppResult<()> {
+    match selection.source_kind {
+        DataSourceKindDto::Database => {
+            if selection.session_id.is_empty() || selection.table.is_empty() {
+                return Err(AppError::Validation(format!("{side} database selection is required")));
+            }
+        }
+        DataSourceKindDto::File => {
+            let Some(file) = selection.file.as_ref() else {
+                return Err(AppError::Validation(format!("{side} CSV file is required")));
+            };
+            if file.path.trim().is_empty() {
+                return Err(AppError::Validation(format!("{side} CSV file is required")));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn load_selection_rows(
+    pool: Option<&sqlx::MySqlPool>,
+    selection: &TableSelectionDto,
+) -> anyhow::Result<Vec<Person>> {
+    match selection.source_kind {
+        DataSourceKindDto::Database => {
+            let pool = pool.ok_or_else(|| anyhow::anyhow!("database pool missing"))?;
+            if selection.column_mapping.is_some() {
+                get_person_rows_mapped(pool, &selection.table, selection.column_mapping.as_ref()).await
+            } else {
+                get_person_rows(pool, &selection.table).await
+            }
+        }
+        DataSourceKindDto::File => {
+            let file = selection
+                .file
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("CSV file selection missing"))?;
+            load_csv_people(
+                &CsvPreviewRequestDto {
+                    path: file.path.clone(),
+                    encoding: file.encoding.clone(),
+                    delimiter: file.delimiter.clone(),
+                    date_format: file.date_format.clone(),
+                },
+                selection.column_mapping.as_ref(),
+            )
+        }
+    }
+}
+
+fn selection_label(selection: &TableSelectionDto) -> String {
+    match selection.source_kind {
+        DataSourceKindDto::Database => selection.table.clone(),
+        DataSourceKindDto::File => selection
+            .file
+            .as_ref()
+            .map(|file| file.path.clone())
+            .unwrap_or_else(|| "csv".to_string()),
+    }
 }
 
 fn validate_mapping_idents(
