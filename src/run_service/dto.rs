@@ -569,6 +569,29 @@ pub struct ScoreBreakdownDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveDecisionRequestDto {
+    pub job_id: String,
+    pub row_id: u64,
+    pub source_id: i64,
+    pub target_id: i64,
+    pub decision: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewDecisionDto {
+    pub job_id: String,
+    pub row_id: u64,
+    pub source_id: i64,
+    pub target_id: i64,
+    pub decision: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    pub updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultPageRequestDto {
     pub job_id: String,
     /// Cursor-based page index. 0 = first page.

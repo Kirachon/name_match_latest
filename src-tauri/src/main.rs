@@ -72,6 +72,8 @@ fn main() {
             // Results / export (T9)
             commands::get_results_page,
             commands::explain_pair,
+            commands::save_decision,
+            commands::get_decisions,
             commands::export_results,
         ])
         .run(tauri::generate_context!())

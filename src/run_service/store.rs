@@ -10,6 +10,7 @@
 
 use super::dto::{
     AlgorithmDto, JobStateDto, JobSummaryDto, MatchPairDto, ResultPageDto, ResultPageRequestDto,
+    ReviewDecisionDto, SaveDecisionRequestDto,
 };
 use crate::models::Person;
 use anyhow::{Result, bail};
@@ -247,6 +248,29 @@ impl ResultStore {
         self.forget_job(job_id)
     }
 
+    pub fn save_decision(&self, request: SaveDecisionRequestDto) -> Result<ReviewDecisionDto> {
+        validate_decision(&request.decision)?;
+        if self.summary(&request.job_id).is_none() {
+            bail!("Unknown job id: {}", request.job_id);
+        }
+        let sqlite = self
+            .sqlite
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Review decisions require SQLite result storage"))?;
+        sqlite.save_decision(&request)
+    }
+
+    pub fn get_decisions(&self, job_id: &str) -> Result<Vec<ReviewDecisionDto>> {
+        if self.summary(job_id).is_none() {
+            bail!("Unknown job id: {}", job_id);
+        }
+        let sqlite = self
+            .sqlite
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Review decisions require SQLite result storage"))?;
+        sqlite.get_decisions(job_id)
+    }
+
     /// Implementation for the Tauri `get_results_page` command.
     pub fn page(&self, req: &ResultPageRequestDto) -> Result<ResultPageDto> {
         if req.limit == 0 || req.limit > 10_000 {
@@ -378,6 +402,13 @@ fn page_from_rows(req: &ResultPageRequestDto, rows: &[MatchPairDto]) -> Result<R
     })
 }
 
+fn validate_decision(decision: &str) -> Result<()> {
+    match decision {
+        "accepted" | "rejected" | "pending" => Ok(()),
+        other => bail!("Invalid review decision: {}", other),
+    }
+}
+
 struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -426,17 +457,9 @@ impl SqliteStore {
                 PRIMARY KEY (job_id, side, person_id),
                 FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
             );
-            CREATE TABLE IF NOT EXISTS decisions (
-                job_id TEXT NOT NULL,
-                row_id INTEGER NOT NULL,
-                decision TEXT NOT NULL,
-                note TEXT,
-                updated_at_unix_ms INTEGER NOT NULL,
-                PRIMARY KEY (job_id, row_id),
-                FOREIGN KEY (job_id, row_id) REFERENCES results(job_id, row_id) ON DELETE CASCADE
-            );
             "#,
         )?;
+        ensure_decisions_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -560,6 +583,86 @@ impl SqliteStore {
             .execute("DELETE FROM jobs WHERE job_id = ?1", params![job_id])?;
         Ok(())
     }
+
+    fn save_decision(&self, request: &SaveDecisionRequestDto) -> Result<ReviewDecisionDto> {
+        let updated_at = now_ms();
+        self.conn.lock().execute(
+            "INSERT INTO decisions(job_id, source_id, target_id, row_id, decision, note, updated_at_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(job_id, source_id, target_id) DO UPDATE SET
+                row_id = excluded.row_id,
+                decision = excluded.decision,
+                note = excluded.note,
+                updated_at_unix_ms = excluded.updated_at_unix_ms",
+            params![
+                request.job_id,
+                request.source_id,
+                request.target_id,
+                request.row_id as i64,
+                request.decision,
+                request.note,
+                updated_at as i64,
+            ],
+        )?;
+        Ok(ReviewDecisionDto {
+            job_id: request.job_id.clone(),
+            row_id: request.row_id,
+            source_id: request.source_id,
+            target_id: request.target_id,
+            decision: request.decision.clone(),
+            note: request.note.clone(),
+            updated_at_unix_ms: updated_at,
+        })
+    }
+
+    fn get_decisions(&self, job_id: &str) -> Result<Vec<ReviewDecisionDto>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT job_id, row_id, source_id, target_id, decision, note, updated_at_unix_ms
+             FROM decisions WHERE job_id = ?1 ORDER BY row_id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![job_id], |row| {
+                Ok(ReviewDecisionDto {
+                    job_id: row.get(0)?,
+                    row_id: row.get::<_, i64>(1)? as u64,
+                    source_id: row.get(2)?,
+                    target_id: row.get(3)?,
+                    decision: row.get(4)?,
+                    note: row.get(5)?,
+                    updated_at_unix_ms: row.get::<_, i64>(6)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+}
+
+fn ensure_decisions_schema(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(decisions)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns.is_empty() && !columns.iter().any(|column| column == "source_id") {
+        conn.execute("DROP TABLE decisions", [])?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS decisions (
+            job_id TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            target_id INTEGER NOT NULL,
+            row_id INTEGER NOT NULL,
+            decision TEXT NOT NULL,
+            note TEXT,
+            updated_at_unix_ms INTEGER NOT NULL,
+            PRIMARY KEY (job_id, source_id, target_id),
+            FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_decisions_job_row ON decisions(job_id, row_id);
+        "#,
+    )?;
+    Ok(())
 }
 
 fn validate_levels(levels: &[u8]) -> Result<()> {
@@ -1123,6 +1226,96 @@ mod tests {
                     levels: Vec::new(),
                 })
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn sqlite_review_decisions_round_trip_and_upsert() {
+        let path = sqlite_path("decisions");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve(
+            "review".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            1,
+        );
+        store
+            .set_rows("review", vec![mk_pair(7, 82.0, "a", "b")])
+            .unwrap();
+        store.mark_finished("review", 1, 2);
+
+        let saved = store
+            .save_decision(SaveDecisionRequestDto {
+                job_id: "review".into(),
+                row_id: 7,
+                source_id: 7,
+                target_id: 1007,
+                decision: "accepted".into(),
+                note: Some("checked".into()),
+            })
+            .unwrap();
+        assert_eq!(saved.decision, "accepted");
+
+        store
+            .save_decision(SaveDecisionRequestDto {
+                job_id: "review".into(),
+                row_id: 7,
+                source_id: 7,
+                target_id: 1007,
+                decision: "rejected".into(),
+                note: None,
+            })
+            .unwrap();
+        let decisions = store.get_decisions("review").unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].decision, "rejected");
+        assert_eq!(decisions[0].note, None);
+    }
+
+    #[test]
+    fn review_decisions_validate_job_and_value() {
+        let path = sqlite_path("decision_validation");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        let request = SaveDecisionRequestDto {
+            job_id: "missing".into(),
+            row_id: 0,
+            source_id: 1,
+            target_id: 2,
+            decision: "accepted".into(),
+            note: None,
+        };
+        assert!(
+            store
+                .save_decision(request)
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown job id")
+        );
+
+        store.reserve(
+            "review".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            1,
+        );
+        store.mark_finished("review", 0, 2);
+        let bad = SaveDecisionRequestDto {
+            job_id: "review".into(),
+            row_id: 0,
+            source_id: 1,
+            target_id: 2,
+            decision: "maybe".into(),
+            note: None,
+        };
+        assert!(bad.decision == "maybe");
+        assert!(
+            store
+                .save_decision(bad)
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid review decision")
         );
     }
 }

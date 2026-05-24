@@ -2,7 +2,8 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use name_matcher::run_service::dto::{
     AlgorithmDto, ExplainPairRequestDto, ExportFormatDto, ExportRequestDto, ExportResultDto,
-    ResultPageDto, ResultPageRequestDto, ScoreBreakdownDto,
+    ResultPageDto, ResultPageRequestDto, ReviewDecisionDto, SaveDecisionRequestDto,
+    ScoreBreakdownDto,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -73,6 +74,28 @@ pub fn explain_pair(
             message: Some("Explanation is currently available for Quick Match fuzzy modes only.".into()),
         }),
     }
+}
+
+#[tauri::command]
+pub fn save_decision(
+    request: SaveDecisionRequestDto,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<ReviewDecisionDto> {
+    state
+        .results
+        .save_decision(request)
+        .map_err(|e| AppError::Validation(e.to_string()))
+}
+
+#[tauri::command]
+pub fn get_decisions(
+    job_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<Vec<ReviewDecisionDto>> {
+    state
+        .results
+        .get_decisions(&job_id)
+        .map_err(|e| AppError::Validation(e.to_string()))
 }
 
 #[tauri::command]

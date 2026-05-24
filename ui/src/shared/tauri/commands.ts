@@ -12,7 +12,9 @@ import type {
   JobSummaryDto,
   ResultPageDto,
   ResultPageRequestDto,
+  ReviewDecisionDto,
   RunConfigDto,
+  SaveDecisionRequestDto,
   ScoreBreakdownDto,
   SystemInfoDto,
   TableColumnsDto,
@@ -99,5 +101,9 @@ export const getResultsPage = (request: ResultPageRequestDto) =>
   call<ResultPageDto>("get_results_page", { request });
 export const explainPair = (request: ExplainPairRequestDto) =>
   call<ScoreBreakdownDto>("explain_pair", { request });
+export const saveDecision = (request: SaveDecisionRequestDto) =>
+  call<ReviewDecisionDto>("save_decision", { request });
+export const getDecisions = (jobId: string) =>
+  call<ReviewDecisionDto[]>("get_decisions", { jobId });
 export const exportResults = (request: ExportRequestDto) =>
   call<ExportResultDto>("export_results", { request });

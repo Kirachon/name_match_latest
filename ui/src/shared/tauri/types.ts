@@ -451,6 +451,21 @@ export interface ResultPageDto {
   rows: MatchPairDto[];
 }
 
+export type ReviewDecisionValue = "accepted" | "rejected" | "pending";
+
+export interface SaveDecisionRequestDto {
+  job_id: string;
+  row_id: number;
+  source_id: number;
+  target_id: number;
+  decision: ReviewDecisionValue;
+  note?: string | null;
+}
+
+export interface ReviewDecisionDto extends SaveDecisionRequestDto {
+  updated_at_unix_ms: number;
+}
+
 export interface JobSummaryDto {
   job_id: string;
   state: JobStateDto;

@@ -132,6 +132,15 @@ const CascadeSchema = z
   .nullable()
   .optional();
 
+export const SaveDecisionSchema = z.object({
+  job_id: z.string().min(1),
+  row_id: z.number().int().min(0),
+  source_id: z.number().int(),
+  target_id: z.number().int(),
+  decision: z.enum(["accepted", "rejected", "pending"]),
+  note: z.string().nullable().optional(),
+});
+
 export const RunConfigSchema = z
   .object({
     source: TableSelectionSchema,
