@@ -1,12 +1,13 @@
 use crate::models::{ColumnMapping, Person};
 use anyhow::{Context, Result, bail};
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, Range, Reader, open_workbook_auto};
 use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const PREVIEW_LIMIT: usize = 5;
+const MAX_EXCEL_BYTES: u64 = 200 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExcelPreviewRequestDto {
@@ -40,6 +41,7 @@ pub fn load_excel_preview(request: &ExcelPreviewRequestDto) -> Result<ExcelPrevi
     if !path.is_file() {
         bail!("Excel file not found: {}", request.path);
     }
+    ensure_file_within_limit(path, MAX_EXCEL_BYTES)?;
     let date_format = normalized_date_format(request);
     let mut workbook =
         open_workbook_auto(path).with_context(|| format!("Failed to open {}", request.path))?;
@@ -65,6 +67,10 @@ pub fn load_excel_preview(request: &ExcelPreviewRequestDto) -> Result<ExcelPrevi
     let range = workbook
         .worksheet_range(&selected_sheet)
         .with_context(|| format!("Excel sheet not found: {selected_sheet}"))?;
+    let mut warnings = Vec::new();
+    if let Ok(formulas) = workbook.worksheet_formula(&selected_sheet) {
+        warnings.extend(formula_cache_warnings(&formulas, &range));
+    }
     let mut row_iter = range.rows();
     let header_row = row_iter
         .next()
@@ -73,7 +79,6 @@ pub fn load_excel_preview(request: &ExcelPreviewRequestDto) -> Result<ExcelPrevi
         .iter()
         .map(cell_to_header)
         .collect::<Vec<String>>();
-    let mut warnings = Vec::new();
     validate_headers(&headers, &mut warnings)?;
     let date_columns = date_column_indexes(&headers);
 
@@ -110,6 +115,7 @@ pub fn load_excel_people(
     if !path.is_file() {
         bail!("Excel file not found: {}", request.path);
     }
+    ensure_file_within_limit(path, MAX_EXCEL_BYTES)?;
     let date_format = normalized_date_format(request);
     let mut workbook =
         open_workbook_auto(path).with_context(|| format!("Failed to open {}", request.path))?;
@@ -121,6 +127,17 @@ pub fn load_excel_people(
     let range = workbook
         .worksheet_range(&selected_sheet)
         .with_context(|| format!("Excel sheet not found: {selected_sheet}"))?;
+    if let Ok(formulas) = workbook.worksheet_formula(&selected_sheet) {
+        let warnings = formula_cache_warnings(&formulas, &range);
+        if warnings
+            .iter()
+            .any(|warning| warning.contains("without cached values"))
+        {
+            bail!(
+                "Excel formula cells without cached values are not supported; open and save the workbook after recalculation, then import again"
+            );
+        }
+    }
     let mut row_iter = range.rows();
     let header_row = row_iter
         .next()
@@ -201,6 +218,20 @@ fn normalized_date_format(request: &ExcelPreviewRequestDto) -> String {
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "%Y-%m-%d".to_string())
+}
+
+fn ensure_file_within_limit(path: &Path, max_bytes: u64) -> Result<()> {
+    let len = std::fs::metadata(path)
+        .with_context(|| format!("Failed to inspect {}", path.display()))?
+        .len();
+    if len > max_bytes {
+        bail!(
+            "Excel file is too large ({:.1} MB); maximum supported size is {:.0} MB",
+            len as f64 / 1024.0 / 1024.0,
+            max_bytes as f64 / 1024.0 / 1024.0
+        );
+    }
+    Ok(())
 }
 
 fn select_sheet(sheet_names: &[String], requested: Option<&str>) -> Result<String> {
@@ -295,6 +326,42 @@ fn validate_headers(headers: &[String], warnings: &mut Vec<String>) -> Result<()
         );
     }
     Ok(())
+}
+
+fn formula_cache_warnings(formulas: &Range<String>, values: &Range<Data>) -> Vec<String> {
+    let mut formula_count = 0usize;
+    let mut missing_cached_values = 0usize;
+    let Some((formula_start_row, formula_start_col)) = formulas.start() else {
+        return Vec::new();
+    };
+    for (row, col, formula) in formulas.used_cells() {
+        if formula.trim().is_empty() {
+            continue;
+        }
+        formula_count += 1;
+        let absolute_row = formula_start_row + row as u32;
+        let absolute_col = formula_start_col + col as u32;
+        let missing = values
+            .get_value((absolute_row, absolute_col))
+            .map(|value| matches!(value, Data::Empty))
+            .unwrap_or(true);
+        if missing {
+            missing_cached_values += 1;
+        }
+    }
+
+    let mut warnings = Vec::new();
+    if formula_count > 0 {
+        warnings.push(format!(
+            "Formula cells detected ({formula_count}); using cached workbook values only. Save after recalculation if values may be stale."
+        ));
+    }
+    if missing_cached_values > 0 {
+        warnings.push(format!(
+            "Formula cells without cached values detected ({missing_cached_values}); open and save the workbook after recalculation before importing."
+        ));
+    }
+    warnings
 }
 
 fn date_column_indexes(headers: &[String]) -> HashSet<usize> {
@@ -438,7 +505,7 @@ fn mapped_column_names(mapping: &ColumnMapping) -> HashSet<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_xlsxwriter::Workbook;
+    use rust_xlsxwriter::{Formula, Workbook};
 
     fn write_fixture(name: &str) -> String {
         let path = std::env::temp_dir().join(format!("nm_excel_loader_{name}.xlsx"));
@@ -451,7 +518,9 @@ mod tests {
         sheet.write_string(0, 3, "dob").unwrap();
         sheet.write_string(0, 4, "note").unwrap();
         sheet.write_number(1, 0, 1).unwrap();
-        sheet.write_string(1, 1, "Ana").unwrap();
+        sheet
+            .write_formula(1, 1, Formula::new("\"Ana\"").set_result("Ana"))
+            .unwrap();
         sheet.write_string(1, 2, "Santos").unwrap();
         sheet.write_number(1, 3, 32875).unwrap();
         sheet.write_string(1, 4, "source-extra").unwrap();
@@ -499,5 +568,119 @@ mod tests {
             people[0].extra_fields.get("note").map(String::as_str),
             Some("source-extra")
         );
+    }
+
+    #[test]
+    fn rejects_file_above_size_limit_before_opening() {
+        let path = std::env::temp_dir().join("nm_excel_loader_size_guard.xlsx");
+        std::fs::write(&path, b"0123456789").unwrap();
+
+        let err = ensure_file_within_limit(&path, 9).unwrap_err();
+
+        assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn generates_stable_content_ids_when_no_id_column_exists() {
+        let path_a = write_no_id_fixture("no_id_a");
+        let path_b = write_no_id_fixture("no_id_b");
+
+        let first = load_excel_people(
+            &ExcelPreviewRequestDto {
+                path: path_a,
+                sheet_name: None,
+                date_format: None,
+            },
+            None,
+        )
+        .unwrap();
+        let second = load_excel_people(
+            &ExcelPreviewRequestDto {
+                path: path_b,
+                sheet_name: None,
+                date_format: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].id, first[1].id);
+        assert_eq!(first[0].id, second[0].id);
+        assert_eq!(first[1].id, second[1].id);
+    }
+
+    #[test]
+    fn rejects_duplicate_explicit_excel_ids() {
+        let path = write_duplicate_id_fixture("duplicate_ids");
+
+        let err = load_excel_people(
+            &ExcelPreviewRequestDto {
+                path,
+                sheet_name: None,
+                date_format: None,
+            },
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate Excel stable id"));
+    }
+
+    #[test]
+    fn reports_formula_cached_value_policy() {
+        let mut formulas = Range::<String>::new((1, 1), (2, 2));
+        formulas.set_value((1, 1), "A1&B1".to_string());
+        formulas.set_value((2, 1), "A2&B2".to_string());
+        let mut values = Range::<Data>::new((0, 0), (2, 2));
+        values.set_value((1, 1), Data::String("cached".to_string()));
+
+        let warnings = formula_cache_warnings(&formulas, &values);
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("cached workbook values"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("without cached values"))
+        );
+    }
+
+    fn write_no_id_fixture(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("nm_excel_loader_{name}.xlsx"));
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write_string(0, 0, "given_name").unwrap();
+        sheet.write_string(0, 1, "surname").unwrap();
+        sheet.write_string(0, 2, "dob").unwrap();
+        sheet.write_string(1, 0, "Ana").unwrap();
+        sheet.write_string(1, 1, "Santos").unwrap();
+        sheet.write_string(1, 2, "1990-01-02").unwrap();
+        sheet.write_string(2, 0, "Ben").unwrap();
+        sheet.write_string(2, 1, "Cruz").unwrap();
+        sheet.write_string(2, 2, "1991-02-03").unwrap();
+        workbook.save(&path).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn write_duplicate_id_fixture(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("nm_excel_loader_{name}.xlsx"));
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write_string(0, 0, "id").unwrap();
+        sheet.write_string(0, 1, "first_name").unwrap();
+        sheet.write_string(0, 2, "last_name").unwrap();
+        sheet.write_string(0, 3, "birthdate").unwrap();
+        for row in 1..=2 {
+            sheet.write_number(row, 0, 1).unwrap();
+            sheet.write_string(row, 1, "Ana").unwrap();
+            sheet.write_string(row, 2, "Santos").unwrap();
+            sheet.write_string(row, 3, "1990-01-02").unwrap();
+        }
+        workbook.save(&path).unwrap();
+        path.to_string_lossy().to_string()
     }
 }
