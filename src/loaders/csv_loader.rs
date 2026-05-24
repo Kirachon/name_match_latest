@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const PREVIEW_LIMIT: usize = 5;
@@ -186,21 +186,24 @@ pub fn load_csv_people(
         .collect::<Vec<_>>();
     validate_headers(&headers, &mut Vec::new())?;
     let mapping = mapping.cloned().unwrap_or_else(|| infer_mapping(&headers));
-    if !mapping.required_ok() {
-        bail!("CSV column mapping is missing id, first_name, last_name, or birthdate");
+    if mapping.first_name.is_empty() || mapping.last_name.is_empty() || mapping.birthdate.is_empty()
+    {
+        bail!("CSV column mapping is missing first_name, last_name, or birthdate");
     }
     let mut people = Vec::new();
-    for record in reader.records() {
+    let mut seen_ids = HashSet::new();
+    for (row_index, record) in reader.records().enumerate() {
         let record = record.context("Failed to parse CSV row")?;
         let row = headers
             .iter()
             .zip(record.iter())
             .map(|(header, value)| (header.as_str(), value.trim()))
             .collect::<HashMap<_, _>>();
-        let id_text = value_for(&row, &mapping.id).unwrap_or("0");
-        let id = id_text
-            .parse::<i64>()
-            .with_context(|| format!("Invalid CSV id value '{}'", id_text))?;
+        let id = stable_row_id(&headers, &row, &mapping)
+            .with_context(|| format!("Invalid CSV id on row {}", row_index + 2))?;
+        if !seen_ids.insert(id) {
+            bail!("Duplicate CSV stable id {} on row {}", id, row_index + 2);
+        }
         let birthdate = value_for(&row, &mapping.birthdate)
             .filter(|v| !v.is_empty())
             .map(|value| NaiveDate::parse_from_str(value, &date_format))
@@ -299,6 +302,13 @@ fn validate_headers(headers: &[String], warnings: &mut Vec<String>) -> Result<()
             warnings.push(format!("Duplicate header detected: {}", header));
         }
     }
+    let inferred = infer_mapping(headers);
+    if inferred.id.is_empty() {
+        warnings.push(
+            "No ID column detected; file runs will use deterministic content-based row IDs. Re-imported unchanged rows keep the same IDs, but edited row content changes IDs."
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -349,6 +359,37 @@ fn normalize(value: &str) -> String {
 
 fn value_for<'a>(row: &'a HashMap<&str, &str>, column: &str) -> Option<&'a str> {
     row.get(column).copied().filter(|value| !value.is_empty())
+}
+
+fn stable_row_id(
+    headers: &[String],
+    row: &HashMap<&str, &str>,
+    mapping: &ColumnMapping,
+) -> Result<i64> {
+    if let Some(id_text) = value_for(row, &mapping.id) {
+        return id_text
+            .parse::<i64>()
+            .with_context(|| format!("Invalid CSV id value '{}'", id_text));
+    }
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for header in headers {
+        fnv1a_update(&mut hash, header.as_bytes());
+        fnv1a_update(&mut hash, b"=");
+        if let Some(value) = row.get(header.as_str()) {
+            fnv1a_update(&mut hash, value.as_bytes());
+        }
+        fnv1a_update(&mut hash, b"\x1f");
+    }
+
+    Ok((hash & 0x7fff_ffff_ffff_ffff) as i64)
+}
+
+fn fnv1a_update(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
 }
 
 fn mapped_column_names(mapping: &ColumnMapping) -> std::collections::HashSet<&str> {
@@ -465,5 +506,82 @@ mod tests {
             people[0].extra_fields.get("note").map(String::as_str),
             Some("ok")
         );
+    }
+
+    #[test]
+    fn generates_stable_content_ids_when_no_id_column_exists() {
+        let path_a = write_fixture(
+            "no_id_a",
+            b"given_name,surname,dob,note\nAna,Santos,1990-01-02,ok\nBen,Cruz,1991-02-03,ok\n",
+        );
+        let path_b = write_fixture(
+            "no_id_b",
+            b"given_name,surname,dob,note\nAna,Santos,1990-01-02,ok\nBen,Cruz,1991-02-03,ok\n",
+        );
+
+        let first = load_csv_people(
+            &CsvPreviewRequestDto {
+                path: path_a,
+                encoding: None,
+                delimiter: None,
+                date_format: None,
+            },
+            None,
+        )
+        .unwrap();
+        let second = load_csv_people(
+            &CsvPreviewRequestDto {
+                path: path_b,
+                encoding: None,
+                delimiter: None,
+                date_format: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].id, first[1].id);
+        assert_eq!(first[0].id, second[0].id);
+        assert_eq!(first[1].id, second[1].id);
+    }
+
+    #[test]
+    fn rejects_duplicate_explicit_csv_ids() {
+        let path = write_fixture(
+            "duplicate_ids",
+            b"id,first_name,last_name,birthdate\n1,Ana,Santos,1990-01-02\n1,Ben,Cruz,1991-02-03\n",
+        );
+
+        let err = load_csv_people(
+            &CsvPreviewRequestDto {
+                path,
+                encoding: None,
+                delimiter: None,
+                date_format: None,
+            },
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Duplicate CSV stable id"));
+    }
+
+    #[test]
+    fn preview_warns_when_no_id_column_exists() {
+        let path = write_fixture(
+            "no_id_preview",
+            b"given_name,surname,dob\nAna,Santos,1990-01-02\n",
+        );
+
+        let preview = load_csv_preview(&CsvPreviewRequestDto {
+            path,
+            encoding: None,
+            delimiter: None,
+            date_format: None,
+        })
+        .unwrap();
+
+        assert!(preview.warnings.iter().any(|w| w.contains("No ID column")));
     }
 }
