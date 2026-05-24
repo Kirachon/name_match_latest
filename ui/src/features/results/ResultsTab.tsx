@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import {
+  diffJobs,
   explainPair,
   exportResults,
   forgetMatchingJob,
   getDecisions,
   getMatchingStatus,
   getResultsPage,
+  listMatchingJobs,
   saveDecision,
 } from "@/shared/tauri/commands";
 import { useJobStore } from "@/shared/stores/jobStore";
@@ -30,6 +32,7 @@ import { formatDuration, formatNumber } from "@/shared/lib/format";
 import { JOB_STATE_TERMINAL } from "@/shared/tauri/types";
 import type {
   ExportFormatDto,
+  DiffResultDto,
   JobSummaryDto,
   MatchPairDto,
   ResultPageDto,
@@ -41,6 +44,7 @@ import { useDebounced } from "@/shared/hooks";
 import { ResultsTable } from "./ResultsTable";
 import { ExplanationPanel } from "./ExplanationPanel";
 import { ReviewToolbar } from "./ReviewToolbar";
+import { DiffView } from "./DiffView";
 
 const PAGE_LIMIT = 1000;
 
@@ -56,6 +60,11 @@ export function ResultsTab() {
   const resetResultView = useResultsStore((s) => s.resetJob);
   const [summary, setSummary] = useState<JobSummaryDto | null>(null);
   const [page, setPage] = useState<ResultPageDto | null>(null);
+  const [jobs, setJobs] = useState<JobSummaryDto[]>([]);
+  const [baseJobId, setBaseJobId] = useState("");
+  const [compareJobId, setCompareJobId] = useState("");
+  const [diff, setDiff] = useState<DiffResultDto | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
   const [selectedRow, setSelectedRow] = useState<MatchPairDto | null>(null);
   const [decisions, setDecisions] = useState<Record<string, ReviewDecisionDto>>(
     {},
@@ -82,6 +91,31 @@ export function ResultsTab() {
     getMatchingStatus(activeJobId)
       .then((s) => {
         if (!cancelled) setSummary(s);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobId]);
+
+  useEffect(() => {
+    if (!activeJobId) {
+      setJobs([]);
+      setBaseJobId("");
+      setCompareJobId("");
+      setDiff(null);
+      return;
+    }
+    let cancelled = false;
+    listMatchingJobs()
+      .then((items) => {
+        if (cancelled) return;
+        setJobs(items);
+        setBaseJobId((current) => current || activeJobId);
+        setCompareJobId((current) => {
+          if (current && current !== activeJobId) return current;
+          return items.find((item) => item.job_id !== activeJobId)?.job_id ?? "";
+        });
       })
       .catch(() => {});
     return () => {
@@ -317,6 +351,29 @@ export function ResultsTab() {
     if (next) setSelectedRow(next);
   }
 
+  async function onCompareJobs() {
+    if (!baseJobId || !compareJobId || baseJobId === compareJobId) return;
+    setDiffLoading(true);
+    try {
+      const result = await diffJobs({
+        base_job_id: baseJobId,
+        compare_job_id: compareJobId,
+      });
+      setDiff(result);
+    } catch (err: unknown) {
+      pushToast({
+        tone: "error",
+        title: "Could not compare runs",
+        message:
+          typeof err === "object" && err && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err),
+      });
+    } finally {
+      setDiffLoading(false);
+    }
+  }
+
   async function onExport(format: ExportFormatDto) {
     if (!activeJobId) return;
     let dir = exportCfg.output_directory;
@@ -548,6 +605,57 @@ export function ResultsTab() {
             })}
           </div>
         )}
+        {jobs.length >= 2 && (
+          <div className="mt-4 grid lg:grid-cols-[1fr_1fr_auto] gap-3 border-t border-white/10 pt-4">
+            <Field label="Base run">
+              <select
+                className="select"
+                value={baseJobId}
+                onChange={(e) => {
+                  setBaseJobId(e.target.value);
+                  setDiff(null);
+                }}
+              >
+                {jobs.map((job) => (
+                  <option key={job.job_id} value={job.job_id}>
+                    {job.job_id.slice(0, 8)} · {job.source_table} →{" "}
+                    {job.target_table}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Compare run">
+              <select
+                className="select"
+                value={compareJobId}
+                onChange={(e) => {
+                  setCompareJobId(e.target.value);
+                  setDiff(null);
+                }}
+              >
+                {jobs
+                  .filter((job) => job.job_id !== baseJobId)
+                  .map((job) => (
+                    <option key={job.job_id} value={job.job_id}>
+                      {job.job_id.slice(0, 8)} · {job.source_table} →{" "}
+                      {job.target_table}
+                    </option>
+                  ))}
+              </select>
+            </Field>
+            <div className="flex items-end">
+              <Button
+                tone="secondary"
+                onClick={onCompareJobs}
+                loading={diffLoading}
+                disabled={!compareJobId || baseJobId === compareJobId}
+              >
+                Compare
+              </Button>
+            </div>
+          </div>
+        )}
+        {diff && <DiffView diff={diff} onClose={() => setDiff(null)} />}
       </Card>
 
       <Card padded={false}>
