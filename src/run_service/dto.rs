@@ -176,6 +176,8 @@ impl Default for DataSourceKindDto {
 pub struct FileSelectionDto {
     pub path: String,
     #[serde(default)]
+    pub sheet_name: Option<String>,
+    #[serde(default)]
     pub encoding: Option<crate::loaders::csv_loader::CsvEncodingDto>,
     #[serde(default)]
     pub delimiter: Option<crate::loaders::csv_loader::CsvDelimiterDto>,

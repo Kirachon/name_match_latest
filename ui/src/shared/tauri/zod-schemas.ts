@@ -28,7 +28,8 @@ const ColumnMappingSchema = z.object({
 });
 
 const FileSelectionSchema = z.object({
-  path: z.string().min(1, "Choose a CSV file"),
+  path: z.string().min(1, "Choose a file"),
+  sheet_name: z.string().nullable().optional(),
   encoding: z
     .enum(["utf8", "utf8-bom", "windows1252", "latin1"])
     .nullable()
@@ -65,7 +66,7 @@ const TableSelectionSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["file", "path"],
-        message: "Choose a CSV file",
+        message: "Choose a file",
       });
     }
   });

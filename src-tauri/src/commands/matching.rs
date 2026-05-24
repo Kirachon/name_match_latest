@@ -4,6 +4,7 @@ use crate::state::{AppState, TauriEventSink};
 use name_matcher::db::get_person_rows;
 use name_matcher::db::schema::get_person_rows_mapped;
 use name_matcher::loaders::csv_loader::{load_csv_people, CsvPreviewRequestDto};
+use name_matcher::loaders::excel_loader::{load_excel_people, ExcelPreviewRequestDto};
 use name_matcher::models::Person;
 use name_matcher::run_service::dto::{
     DataSourceKindDto, JobStateDto, JobSummaryDto, RunConfigDto, TableSelectionDto,
@@ -123,10 +124,10 @@ fn validate_selection(side: &str, selection: &TableSelectionDto) -> AppResult<()
         }
         DataSourceKindDto::File => {
             let Some(file) = selection.file.as_ref() else {
-                return Err(AppError::Validation(format!("{side} CSV file is required")));
+                return Err(AppError::Validation(format!("{side} file is required")));
             };
             if file.path.trim().is_empty() {
-                return Err(AppError::Validation(format!("{side} CSV file is required")));
+                return Err(AppError::Validation(format!("{side} file is required")));
             }
         }
     }
@@ -150,18 +151,34 @@ async fn load_selection_rows(
             let file = selection
                 .file
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("CSV file selection missing"))?;
-            load_csv_people(
-                &CsvPreviewRequestDto {
-                    path: file.path.clone(),
-                    encoding: file.encoding.clone(),
-                    delimiter: file.delimiter.clone(),
-                    date_format: file.date_format.clone(),
-                },
-                selection.column_mapping.as_ref(),
-            )
+                .ok_or_else(|| anyhow::anyhow!("file selection missing"))?;
+            if is_excel_path(&file.path) {
+                load_excel_people(
+                    &ExcelPreviewRequestDto {
+                        path: file.path.clone(),
+                        sheet_name: file.sheet_name.clone(),
+                        date_format: file.date_format.clone(),
+                    },
+                    selection.column_mapping.as_ref(),
+                )
+            } else {
+                load_csv_people(
+                    &CsvPreviewRequestDto {
+                        path: file.path.clone(),
+                        encoding: file.encoding.clone(),
+                        delimiter: file.delimiter.clone(),
+                        date_format: file.date_format.clone(),
+                    },
+                    selection.column_mapping.as_ref(),
+                )
+            }
         }
     }
+}
+
+fn is_excel_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".xlsx") || lower.ends_with(".xls")
 }
 
 fn selection_label(selection: &TableSelectionDto) -> String {
@@ -171,7 +188,7 @@ fn selection_label(selection: &TableSelectionDto) -> String {
             .file
             .as_ref()
             .map(|file| file.path.clone())
-            .unwrap_or_else(|| "csv".to_string()),
+            .unwrap_or_else(|| "file".to_string()),
     }
 }
 

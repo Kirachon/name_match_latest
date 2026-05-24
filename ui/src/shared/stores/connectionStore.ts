@@ -3,8 +3,8 @@ import type {
   ColumnMappingDto,
   CsvDelimiterDto,
   CsvEncodingDto,
-  CsvPreviewDto,
   DbSessionDto,
+  FilePreviewDto,
   TableColumnsDto,
   TableInfoDto,
 } from "@/shared/tauri/types";
@@ -14,9 +14,10 @@ export type DataSourceMode = "database" | "file";
 
 export interface FileSourceState {
   path: string;
-  preview: CsvPreviewDto | null;
+  preview: FilePreviewDto | null;
   loading: boolean;
   error: string | null;
+  sheetName: string | null;
   encoding: CsvEncodingDto | null;
   delimiter: CsvDelimiterDto | null;
   dateFormat: string;
@@ -40,6 +41,7 @@ const emptyFile: FileSourceState = {
   preview: null,
   loading: false,
   error: null,
+  sheetName: null,
   encoding: null,
   delimiter: null,
   dateFormat: "%Y-%m-%d",
@@ -163,13 +165,13 @@ export function readinessForRun(state: ConnectionStore): {
   reason: string | null;
 } {
   if (state.source.mode === "file" && !state.source.file.preview)
-    return { ready: false, reason: "Preview a source CSV file" };
+    return { ready: false, reason: "Preview a source file" };
   if (state.source.mode === "file" && !state.source.columnMapping)
-    return { ready: false, reason: "Map the source CSV columns" };
+    return { ready: false, reason: "Map the source file columns" };
   if (state.target.mode === "file" && !state.target.file.preview)
-    return { ready: false, reason: "Preview a target CSV file" };
+    return { ready: false, reason: "Preview a target file" };
   if (state.target.mode === "file" && !state.target.columnMapping)
-    return { ready: false, reason: "Map the target CSV columns" };
+    return { ready: false, reason: "Map the target file columns" };
   if (state.source.mode === "database" && !state.source.session)
     return { ready: false, reason: "Connect a source database" };
   if (state.source.mode === "database" && !state.source.selectedTable)

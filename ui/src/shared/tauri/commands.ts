@@ -8,6 +8,8 @@ import type {
   DbSessionDto,
   DiffJobsRequestDto,
   DiffResultDto,
+  ExcelPreviewDto,
+  ExcelPreviewRequestDto,
   ExportRequestDto,
   ExportResultDto,
   ExplainPairRequestDto,
@@ -79,6 +81,8 @@ export const listSessions = () => call<DbSessionDto[]>("list_sessions");
 
 export const loadCsvPreview = (request: CsvPreviewRequestDto) =>
   call<CsvPreviewDto>("load_csv_preview", { request });
+export const loadExcelPreview = (request: ExcelPreviewRequestDto) =>
+  call<ExcelPreviewDto>("load_excel_preview", { request });
 
 // ---------- Matching ----------
 

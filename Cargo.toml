@@ -41,6 +41,7 @@ path = "src/bin/seed.rs"
 
 [dependencies]
 anyhow = "1.0.99"
+calamine = "0.26"
 chrono = { version = "0.4.42", features = ["serde"] }
 chardetng = "0.1.17"
 clap = { version = "4", features = ["derive", "env"] }

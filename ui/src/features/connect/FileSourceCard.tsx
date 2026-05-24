@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { loadCsvPreview } from "@/shared/tauri/commands";
+import { loadCsvPreview, loadExcelPreview } from "@/shared/tauri/commands";
 import {
   type SessionSide,
   useConnectionStore,
@@ -17,6 +17,8 @@ import type {
   CsvDelimiterDto,
   CsvEncodingDto,
   CsvPreviewDto,
+  ExcelPreviewDto,
+  FilePreviewDto,
   TableColumnsDto,
 } from "@/shared/tauri/types";
 import { ColumnMapper } from "./ColumnMapper";
@@ -47,40 +49,63 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
     const picked = await open({
       directory: false,
       multiple: false,
-      filters: [{ name: "CSV", extensions: ["csv", "txt"] }],
+      filters: [{ name: "CSV or Excel", extensions: ["csv", "txt", "xlsx", "xls"] }],
     }).catch(() => null);
     if (typeof picked === "string") {
-      setFileSource(side, { path: picked, preview: null, error: null });
-      await preview(picked);
+      setFileSource(side, {
+        path: picked,
+        preview: null,
+        error: null,
+        sheetName: null,
+      });
+      await preview(picked, null);
     }
   }
 
-  async function preview(path = file.path) {
+  async function preview(path = file.path, sheetName = file.sheetName) {
     if (!path.trim()) {
-      setFileSource(side, { error: "Choose a CSV file first" });
+      setFileSource(side, { error: "Choose a file first" });
       return;
     }
     setFileSource(side, { loading: true, error: null });
     try {
-      const result = await loadCsvPreview({
-        path,
-        encoding: file.encoding,
-        delimiter: file.delimiter,
-        date_format: file.dateFormat,
-      });
-      setFileSource(side, {
-        path,
-        preview: result,
-        loading: false,
-        error: null,
-        encoding: result.encoding,
-        delimiter: result.delimiter,
-        dateFormat: result.date_format,
-      });
+      const result = isExcelPath(path)
+        ? await loadExcelPreview({
+            path,
+            sheet_name: sheetName,
+            date_format: file.dateFormat,
+          })
+        : await loadCsvPreview({
+            path,
+            encoding: file.encoding,
+            delimiter: file.delimiter,
+            date_format: file.dateFormat,
+          });
+      if (isExcelPreview(result)) {
+        setFileSource(side, {
+          path,
+          preview: result,
+          loading: false,
+          error: null,
+          sheetName: result.selected_sheet,
+          dateFormat: result.date_format,
+        });
+      } else {
+        setFileSource(side, {
+          path,
+          preview: result,
+          loading: false,
+          error: null,
+          sheetName: null,
+          encoding: result.encoding,
+          delimiter: result.delimiter,
+          dateFormat: result.date_format,
+        });
+      }
       setColumnMapping(side, inferColumnMapping(result.headers));
       pushToast({
         tone: "success",
-        title: `${sideLabel(side)} CSV preview loaded`,
+        title: `${sideLabel(side)} ${isExcelPreview(result) ? "Excel" : "CSV"} preview loaded`,
         message: `${result.headers.length} columns detected`,
         ttlMs: 1800,
       });
@@ -90,79 +115,115 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
           ? String((err as { message: unknown }).message)
           : String(err);
       setFileSource(side, { loading: false, error: message });
-      pushToast({ tone: "error", title: "CSV preview failed", message });
+      pushToast({ tone: "error", title: "File preview failed", message });
     }
   }
+
+  const selectedFileIsExcel = isExcelPath(file.path);
 
   return (
     <Card className="space-y-4">
       <SectionHeader
         title={side === "source" ? "Source File" : "Target File"}
-        description="Preview a CSV file before mapping its columns for matching."
+        description="Preview a CSV or Excel file before mapping its columns for matching."
         action={
           file.preview ? (
             <Pill tone="info">{file.preview.headers.length} columns</Pill>
           ) : (
-            <Pill tone="mute">CSV</Pill>
+            <Pill tone="mute">{selectedFileIsExcel ? "Excel" : "CSV / Excel"}</Pill>
           )
         }
       />
-      <Field label="CSV path" required>
+      <Field label="File path" required>
         <div className="flex gap-2">
           <input
             className="input flex-1"
             value={file.path}
-            onChange={(e) =>
+            onChange={(e) => {
               setFileSource(side, {
                 path: e.target.value,
                 preview: null,
                 error: null,
+                sheetName: null,
               })
-            }
-            placeholder="C:/data/beneficiaries.csv"
+              setColumnMapping(side, null);
+            }}
+            placeholder="C:/data/beneficiaries.csv or .xlsx"
           />
           <Button tone="secondary" onClick={pickFile}>
             Browse...
           </Button>
         </div>
       </Field>
-      <div className="grid md:grid-cols-3 gap-3">
-        <Field label="Encoding">
-          <select
-            className="select"
-            value={file.encoding ?? ""}
-            onChange={(e) =>
-              setFileSource(side, {
-                encoding: (e.target.value || null) as CsvEncodingDto | null,
-                preview: null,
-              })
-            }
-          >
-            {ENCODINGS.map((encoding) => (
-              <option key={encoding.id || "auto"} value={encoding.id}>
-                {encoding.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Delimiter">
-          <select
-            className="select"
-            value={file.delimiter ?? ""}
-            onChange={(e) =>
-              setFileSource(side, {
-                delimiter: (e.target.value || null) as CsvDelimiterDto | null,
-                preview: null,
-              })
-            }
-          >
-            {DELIMITERS.map((delimiter) => (
-              <option key={delimiter.id || "auto"} value={delimiter.id}>
-                {delimiter.label}
-              </option>
-            ))}
-          </select>
-        </Field>
+      <div
+        className={selectedFileIsExcel ? "grid md:grid-cols-2 gap-3" : "grid md:grid-cols-3 gap-3"}
+      >
+        {!selectedFileIsExcel && (
+          <>
+            <Field label="Encoding">
+              <select
+                className="select"
+                value={file.encoding ?? ""}
+                onChange={(e) =>
+                  setFileSource(side, {
+                    encoding: (e.target.value || null) as CsvEncodingDto | null,
+                    preview: null,
+                  })
+                }
+              >
+                {ENCODINGS.map((encoding) => (
+                  <option key={encoding.id || "auto"} value={encoding.id}>
+                    {encoding.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Delimiter">
+              <select
+                className="select"
+                value={file.delimiter ?? ""}
+                onChange={(e) =>
+                  setFileSource(side, {
+                    delimiter: (e.target.value || null) as CsvDelimiterDto | null,
+                    preview: null,
+                  })
+                }
+              >
+                {DELIMITERS.map((delimiter) => (
+                  <option key={delimiter.id || "auto"} value={delimiter.id}>
+                    {delimiter.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </>
+        )}
+        {selectedFileIsExcel && (
+          <Field label="Sheet">
+            <select
+              className="select"
+              value={file.sheetName ?? ""}
+              disabled={!file.preview || !isExcelPreview(file.preview)}
+              onChange={(e) => {
+                setFileSource(side, {
+                  sheetName: e.target.value || null,
+                  preview: null,
+                });
+                setColumnMapping(side, null);
+              }}
+            >
+              {file.preview && isExcelPreview(file.preview) ? (
+                file.preview.sheets.map((sheet) => (
+                  <option key={sheet.name} value={sheet.name}>
+                    {sheet.name} ({sheet.rows.toLocaleString()} rows)
+                  </option>
+                ))
+              ) : (
+                <option value="">Preview to load sheets</option>
+              )}
+            </select>
+          </Field>
+        )}
         <Field label="Date format">
           <input
             className="input font-mono"
@@ -179,12 +240,10 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
       </div>
       <div className="flex flex-wrap gap-2">
         <Button tone="primary" loading={file.loading} onClick={() => preview()}>
-          Preview CSV
+          Preview file
         </Button>
         {file.preview && (
-          <Pill tone="ok">
-            {delimiterLabel(file.preview.delimiter)} / {file.preview.encoding}
-          </Pill>
+          <Pill tone="ok">{previewMeta(file.preview)}</Pill>
         )}
       </div>
       {file.error && (
@@ -273,7 +332,7 @@ function normalize(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function PreviewTable({ preview }: { preview: CsvPreviewDto }) {
+function PreviewTable({ preview }: { preview: FilePreviewDto }) {
   return (
     <div className="space-y-3">
       {preview.warnings.length > 0 && (
@@ -327,4 +386,20 @@ function delimiterLabel(delimiter: CsvDelimiterDto) {
     : delimiter === "semicolon"
       ? "Semicolon"
       : "Tab";
+}
+
+function isExcelPath(path: string) {
+  const lower = path.toLowerCase();
+  return lower.endsWith(".xlsx") || lower.endsWith(".xls");
+}
+
+function isExcelPreview(preview: FilePreviewDto): preview is ExcelPreviewDto {
+  return "sheets" in preview;
+}
+
+function previewMeta(preview: FilePreviewDto) {
+  if (isExcelPreview(preview)) {
+    return `Sheet: ${preview.selected_sheet}`;
+  }
+  return `${delimiterLabel((preview as CsvPreviewDto).delimiter)} / ${(preview as CsvPreviewDto).encoding}`;
 }

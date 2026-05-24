@@ -348,6 +348,7 @@ function selectionFromSide(
       column_mapping: side.columnMapping,
       file: {
         path: side.file.path,
+        sheet_name: side.file.sheetName,
         encoding: side.file.encoding,
         delimiter: side.file.delimiter,
         date_format: side.file.dateFormat,

@@ -90,8 +90,15 @@ export interface CsvPreviewRequestDto {
   date_format?: string | null;
 }
 
+export interface ExcelPreviewRequestDto {
+  path: string;
+  sheet_name?: string | null;
+  date_format?: string | null;
+}
+
 export interface FileSelectionDto {
   path: string;
+  sheet_name?: string | null;
   encoding?: CsvEncodingDto | null;
   delimiter?: CsvDelimiterDto | null;
   date_format?: string | null;
@@ -107,6 +114,24 @@ export interface CsvPreviewDto {
   date_format: string;
   total_preview_rows: number;
 }
+
+export interface ExcelSheetDto {
+  name: string;
+  rows: number;
+}
+
+export interface ExcelPreviewDto {
+  path: string;
+  sheets: ExcelSheetDto[];
+  selected_sheet: string;
+  headers: string[];
+  rows: string[][];
+  warnings: string[];
+  date_format: string;
+  total_preview_rows: number;
+}
+
+export type FilePreviewDto = CsvPreviewDto | ExcelPreviewDto;
 
 /* ---------- Run config ---------- */
 

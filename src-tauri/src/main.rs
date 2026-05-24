@@ -59,8 +59,9 @@ fn main() {
             commands::get_row_count,
             commands::disconnect_db,
             commands::list_sessions,
-            // File preview/import (B1)
+            // File preview/import (B1/B2)
             commands::load_csv_preview,
+            commands::load_excel_preview,
             // Matching lifecycle (T7)
             commands::start_matching,
             commands::cancel_matching,
