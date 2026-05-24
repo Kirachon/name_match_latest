@@ -5,6 +5,7 @@ use name_matcher::run_service::dto::{
     ExportRequestDto, ExportResultDto, ResultPageDto, ResultPageRequestDto, ReviewDecisionDto,
     SaveDecisionRequestDto, ScoreBreakdownDto,
 };
+use name_matcher::run_service::StoredJob;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use tauri::State;
@@ -30,6 +31,13 @@ pub fn explain_pair(
         .results
         .snapshot(&request.job_id)
         .ok_or_else(|| AppError::Validation(format!("unknown job_id: {}", request.job_id)))?;
+    explain_pair_from_snapshot(&snap, &request)
+}
+
+fn explain_pair_from_snapshot(
+    snap: &StoredJob,
+    request: &ExplainPairRequestDto,
+) -> AppResult<ScoreBreakdownDto> {
     let source = snap
         .source_people
         .iter()
@@ -46,7 +54,7 @@ pub fn explain_pair(
                 source,
                 target,
                 matches!(snap.summary.algorithm, AlgorithmDto::FuzzyNoMiddle),
-                true,
+                snap.allow_birthdate_swap,
             );
             Ok(ScoreBreakdownDto {
                 supported: b.supported,
@@ -454,6 +462,8 @@ fn extra_field_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
+    use name_matcher::models::Person;
     use name_matcher::run_service::dto::{AlgorithmDto, JobStateDto, JobSummaryDto, MatchPairDto};
 
     fn row(idx: u64, level: Option<u8>) -> MatchPairDto {
@@ -504,6 +514,30 @@ mod tests {
             elapsed_secs: 1,
             started_at_unix_ms: 0,
             finished_at_unix_ms: Some(1000),
+        }
+    }
+
+    fn person(id: i64, birthdate: (i32, u32, u32)) -> Person {
+        Person {
+            id,
+            uuid: Some(format!("person-{id}")),
+            first_name: Some("Ana".into()),
+            middle_name: Some("Maria".into()),
+            last_name: Some("Santos".into()),
+            birthdate: NaiveDate::from_ymd_opt(birthdate.0, birthdate.1, birthdate.2),
+            hh_id: None,
+            extra_fields: Default::default(),
+        }
+    }
+
+    fn explain_snapshot(allow_birthdate_swap: bool) -> StoredJob {
+        StoredJob {
+            summary: summary(),
+            allow_birthdate_swap,
+            rows: Vec::new(),
+            source_people: vec![person(1, (1990, 4, 12))],
+            target_people: vec![person(2, (1990, 12, 4))],
+            last_accessed_unix_ms: 0,
         }
     }
 
@@ -594,5 +628,24 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].row_id, 1);
+    }
+
+    #[test]
+    fn explain_pair_uses_stored_birthdate_swap_option() {
+        let request = ExplainPairRequestDto {
+            job_id: "job-test".into(),
+            source_id: 1,
+            target_id: 2,
+        };
+
+        let no_swap = explain_pair_from_snapshot(&explain_snapshot(false), &request).unwrap();
+        assert_eq!(no_swap.birthdate_match, Some(false));
+        assert!(!no_swap.birthdate_swap_used);
+        assert!(no_swap.confidence.is_none());
+
+        let with_swap = explain_pair_from_snapshot(&explain_snapshot(true), &request).unwrap();
+        assert_eq!(with_swap.birthdate_match, Some(true));
+        assert!(with_swap.birthdate_swap_used);
+        assert_eq!(with_swap.confidence, Some(100.0));
     }
 }

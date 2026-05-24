@@ -322,12 +322,13 @@ impl RunService {
             .unwrap_or(0);
 
         // Reserve store slot up-front so the frontend can poll immediately.
-        store.reserve(
+        store.reserve_with_options(
             job_id.clone(),
             config.algorithm,
             selection_label(&config.source),
             selection_label(&config.target),
             started_at_unix_ms,
+            config.options.allow_birthdate_swap,
         );
 
         let handle_state = Arc::clone(&state);

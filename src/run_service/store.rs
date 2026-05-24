@@ -9,9 +9,8 @@
 //! paged, exported, explained, reviewed, and diffed by later features.
 
 use super::dto::{
-    AlgorithmDto, DiffChangedRowDto, DiffJobsRequestDto, DiffResultDto, JobStateDto,
-    JobSummaryDto, MatchPairDto, ResultPageDto, ResultPageRequestDto, ReviewDecisionDto,
-    SaveDecisionRequestDto,
+    AlgorithmDto, DiffChangedRowDto, DiffJobsRequestDto, DiffResultDto, JobStateDto, JobSummaryDto,
+    MatchPairDto, ResultPageDto, ResultPageRequestDto, ReviewDecisionDto, SaveDecisionRequestDto,
 };
 use crate::models::Person;
 use anyhow::{Result, bail};
@@ -35,6 +34,7 @@ impl Default for ResultStoreConfig {
 #[derive(Debug, Clone)]
 pub struct StoredJob {
     pub summary: JobSummaryDto,
+    pub allow_birthdate_swap: bool,
     pub rows: Vec<MatchPairDto>,
     pub source_people: Vec<Person>,
     pub target_people: Vec<Person>,
@@ -84,6 +84,25 @@ impl ResultStore {
         target_table: String,
         started_at_unix_ms: u64,
     ) {
+        self.reserve_with_options(
+            job_id,
+            algorithm,
+            source_table,
+            target_table,
+            started_at_unix_ms,
+            false,
+        );
+    }
+
+    pub fn reserve_with_options(
+        &self,
+        job_id: String,
+        algorithm: AlgorithmDto,
+        source_table: String,
+        target_table: String,
+        started_at_unix_ms: u64,
+        allow_birthdate_swap: bool,
+    ) {
         let mut g = self.inner.lock();
         g.insert(
             job_id.clone(),
@@ -99,6 +118,7 @@ impl ResultStore {
                     started_at_unix_ms,
                     finished_at_unix_ms: None,
                 },
+                allow_birthdate_swap,
                 rows: Vec::new(),
                 source_people: Vec::new(),
                 target_people: Vec::new(),
@@ -500,6 +520,7 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
                 summary_json TEXT NOT NULL,
+                allow_birthdate_swap INTEGER NOT NULL DEFAULT 0,
                 state TEXT NOT NULL,
                 algorithm TEXT NOT NULL,
                 started_at_unix_ms INTEGER NOT NULL,
@@ -527,6 +548,7 @@ impl SqliteStore {
             );
             "#,
         )?;
+        ensure_jobs_schema(&conn)?;
         ensure_decisions_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -537,10 +559,11 @@ impl SqliteStore {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT OR REPLACE INTO jobs(job_id, summary_json, state, algorithm, started_at_unix_ms, finished_at_unix_ms, matches_found) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO jobs(job_id, summary_json, allow_birthdate_swap, state, algorithm, started_at_unix_ms, finished_at_unix_ms, matches_found) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 job.summary.job_id,
                 serde_json::to_string(&job.summary)?,
+                if job.allow_birthdate_swap { 1_i64 } else { 0_i64 },
                 serde_json::to_string(&job.summary.state)?,
                 serde_json::to_string(&job.summary.algorithm)?,
                 job.summary.started_at_unix_ms as i64,
@@ -618,6 +641,15 @@ impl SqliteStore {
             return Ok(None);
         };
         let conn = self.conn.lock();
+        let allow_birthdate_swap = conn
+            .query_row(
+                "SELECT allow_birthdate_swap FROM jobs WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|value| value != 0)
+            .unwrap_or(false);
         let mut rows_stmt =
             conn.prepare("SELECT row_json FROM results WHERE job_id = ?1 ORDER BY row_id ASC")?;
         let rows = rows_stmt
@@ -638,6 +670,7 @@ impl SqliteStore {
         };
         Ok(Some(StoredJob {
             summary,
+            allow_birthdate_swap,
             rows,
             source_people: load_people("source")?,
             target_people: load_people("target")?,
@@ -704,6 +737,23 @@ impl SqliteStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+fn ensure_jobs_schema(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(jobs)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns
+        .iter()
+        .any(|column| column == "allow_birthdate_swap")
+    {
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN allow_birthdate_swap INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_decisions_schema(conn: &Connection) -> Result<()> {
@@ -1187,12 +1237,13 @@ mod tests {
     fn sqlite_store_reloads_completed_job_after_restart() {
         let path = sqlite_path("reload");
         let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
-        store.reserve(
+        store.reserve_with_options(
             "persisted".into(),
             AlgorithmDto::Fuzzy,
             "source".into(),
             "target".into(),
             10,
+            true,
         );
         store
             .set_rows(
@@ -1207,6 +1258,12 @@ mod tests {
         let summary = reloaded.summary("persisted").unwrap();
         assert_eq!(summary.matches_found, 1);
         assert_eq!(summary.state, JobStateDto::Completed);
+        assert!(
+            reloaded
+                .snapshot("persisted")
+                .expect("persisted snapshot")
+                .allow_birthdate_swap
+        );
 
         let page = reloaded
             .page(&ResultPageRequestDto {
