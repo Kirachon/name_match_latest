@@ -62,9 +62,20 @@ export interface TableColumnsDto {
   raw_columns: string[];
 }
 
+export interface ColumnMappingDto {
+  id: string;
+  uuid?: string | null;
+  first_name: string;
+  middle_name?: string | null;
+  last_name: string;
+  birthdate: string;
+  hh_id?: string | null;
+}
+
 export interface TableSelectionDto {
   session_id: string;
   table: string;
+  column_mapping?: ColumnMappingDto | null;
 }
 
 /* ---------- Run config ---------- */

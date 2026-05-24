@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import {
@@ -24,20 +23,15 @@ import {
   Pill,
   SectionHeader,
 } from "@/shared/components/primitives";
-import {
-  cx,
-  formatDuration,
-  formatNumber,
-  formatPercent,
-} from "@/shared/lib/format";
+import { formatDuration, formatNumber } from "@/shared/lib/format";
 import { JOB_STATE_TERMINAL } from "@/shared/tauri/types";
 import type {
   ExportFormatDto,
   JobSummaryDto,
-  MatchPairDto,
   ResultPageDto,
 } from "@/shared/tauri/types";
 import { useDebounced } from "@/shared/hooks";
+import { ResultsTable } from "./ResultsTable";
 
 const PAGE_LIMIT = 1000;
 
@@ -424,134 +418,5 @@ export function ResultsTab() {
         <ResultsTable rows={page?.rows ?? []} />
       </Card>
     </div>
-  );
-}
-
-const COL_TEMPLATE = "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px";
-
-function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
-  const parentRef = useRef<HTMLDivElement>(null);
-  const rowVirtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 32,
-    overscan: 12,
-  });
-
-  return (
-    <div
-      ref={parentRef}
-      className="h-[520px] overflow-auto border-t border-ink-800/70"
-      style={{ ["--data-cols" as string]: COL_TEMPLATE }}
-      role="table"
-      aria-label="Match results"
-    >
-      <div className="data-row data-header h-9" role="row">
-        <div role="columnheader" className="font-mono">
-          #
-        </div>
-        <div role="columnheader">Source ID</div>
-        <div role="columnheader">Source name</div>
-        <div role="columnheader">Source DOB</div>
-        <div role="columnheader">Target ID</div>
-        <div role="columnheader">Target name</div>
-        <div role="columnheader">Target DOB</div>
-        <div role="columnheader" className="text-right">
-          Confidence
-        </div>
-        <div role="columnheader">Level / method</div>
-        <div role="columnheader">Fields</div>
-      </div>
-      <div
-        style={{
-          height: `${rowVirtualizer.getTotalSize()}px`,
-          width: "100%",
-          position: "relative",
-        }}
-      >
-        {rowVirtualizer.getVirtualItems().map((vi) => {
-          const r = rows[vi.index];
-          if (!r) return null;
-          return (
-            <div
-              key={r.row_id}
-              role="row"
-              className="data-row"
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                transform: `translateY(${vi.start}px)`,
-                height: `${vi.size}px`,
-              }}
-            >
-              <div role="cell" className="font-mono text-ink-500 tabular">
-                {r.row_id}
-              </div>
-              <div role="cell" className="tabular text-ink-400">
-                {r.source_id}
-              </div>
-              <div role="cell" className="truncate" title={r.source_full_name}>
-                {r.source_full_name}
-              </div>
-              <div role="cell" className="tabular text-ink-400">
-                {r.source_birthdate ?? "—"}
-              </div>
-              <div role="cell" className="tabular text-ink-400">
-                {r.target_id}
-              </div>
-              <div role="cell" className="truncate" title={r.target_full_name}>
-                {r.target_full_name}
-              </div>
-              <div role="cell" className="tabular text-ink-400">
-                {r.target_birthdate ?? "—"}
-              </div>
-              <div role="cell" className="text-right tabular">
-                <ConfidencePill value={r.confidence} />
-              </div>
-              <div
-                role="cell"
-                className="text-2xs text-ink-300 truncate"
-                title={r.match_method ?? undefined}
-              >
-                {r.matched_at_level
-                  ? `L${String(r.matched_at_level).padStart(2, "0")}${
-                      r.match_method
-                        ? ` · ${r.match_method.replace(/^L\d+\s*-\s*/, "")}`
-                        : ""
-                    }`
-                  : "—"}
-              </div>
-              <div
-                role="cell"
-                className="text-2xs text-ink-400 truncate"
-                title={r.matched_fields.join(", ")}
-              >
-                {r.matched_fields.join(", ")}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function ConfidencePill({ value }: { value: number }) {
-  const tone =
-    value >= 95 ? "ok" : value >= 85 ? "info" : value >= 70 ? "warn" : "danger";
-  return (
-    <span
-      className={cx(
-        "tabular px-1.5 py-0.5 rounded text-xs",
-        tone === "ok" && "bg-ok-500/15 text-ok-400",
-        tone === "info" && "bg-accent-500/15 text-accent-400",
-        tone === "warn" && "bg-warn-500/15 text-warn-400",
-        tone === "danger" && "bg-danger-500/15 text-danger-400",
-      )}
-    >
-      {formatPercent(value)}
-    </span>
   );
 }

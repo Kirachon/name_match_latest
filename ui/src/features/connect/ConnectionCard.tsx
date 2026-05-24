@@ -1,0 +1,515 @@
+import { useEffect, useState } from "react";
+import {
+  connectDb,
+  disconnectDb,
+  getRowCount,
+  getTableColumns,
+  listTables,
+  testConnection,
+  validateDbCredentials,
+} from "@/shared/tauri/commands";
+import {
+  type SessionSide,
+  useConnectionStore,
+} from "@/shared/stores/connectionStore";
+import { useConfigStore } from "@/shared/stores/configStore";
+import { useToastStore } from "@/shared/stores/toastStore";
+import {
+  Button,
+  Card,
+  Field,
+  Pill,
+  SectionHeader,
+  StatusDot,
+  Toggle,
+} from "@/shared/components/primitives";
+import { type DbCredentialsDto } from "@/shared/tauri/types";
+import {
+  clearPersistedPassword,
+  loadPersistedConnection,
+  type PersistedConnection,
+  savePersistedConnection,
+} from "./persistence";
+import { ColumnMapper } from "./ColumnMapper";
+import { SchemaQuality } from "./SchemaQuality";
+
+type Form = DbCredentialsDto;
+type CredentialStatus = "checking" | "valid" | "expired" | "unknown";
+
+const blankForm: Form = {
+  host: "127.0.0.1",
+  port: 3306,
+  username: "root",
+  password: "",
+  database: "",
+};
+
+export function ConnectionCard({ side }: { side: SessionSide }) {
+  const slice = useConnectionStore((s) => s[side]);
+  const setSession = useConnectionStore((s) => s.setSession);
+  const setLoading = useConnectionStore((s) => s.setLoading);
+  const setTables = useConnectionStore((s) => s.setTables);
+  const setSelectedTable = useConnectionStore((s) => s.setSelectedTable);
+  const setColumnMapping = useConnectionStore((s) => s.setColumnMapping);
+  const setColumns = useConnectionStore((s) => s.setColumns);
+  const setRowCount = useConnectionStore((s) => s.setRowCount);
+  const setError = useConnectionStore((s) => s.setError);
+  const pushToast = useToastStore((s) => s.push);
+
+  const [form, setForm] = useState<Form>(blankForm);
+  const [latency, setLatency] = useState<number | null>(null);
+  const [rememberPassword, setRememberPassword] = useState(false);
+  const [savedTable, setSavedTable] = useState<string | null>(null);
+  const [lastConnectedMs, setLastConnectedMs] = useState<number | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  const [credentialStatus, setCredentialStatus] =
+    useState<CredentialStatus>("unknown");
+
+  useEffect(() => {
+    let cancelled = false;
+    loadPersistedConnection(side)
+      .then((rec) => {
+        if (cancelled || !rec) {
+          setHydrated(true);
+          return;
+        }
+        setForm({
+          host: rec.host,
+          port: rec.port,
+          username: rec.username,
+          password: rec.password ?? "",
+          database: rec.database,
+        });
+        setRememberPassword(rec.password_saved);
+        setSavedTable(rec.table ?? null);
+        setColumnMapping(side, rec.column_mapping ?? null);
+        setLastConnectedMs(rec.last_connected_unix_ms);
+        setHydrated(true);
+        if (rec.password_saved && rec.password) {
+          setCredentialStatus("checking");
+          validateDbCredentials({
+            host: rec.host,
+            port: rec.port,
+            username: rec.username,
+            password: rec.password,
+            database: rec.database,
+          })
+            .then(() => {
+              if (!cancelled) setCredentialStatus("valid");
+            })
+            .catch(async () => {
+              if (cancelled) return;
+              setCredentialStatus("expired");
+              await clearPersistedPassword(side).catch(() => {});
+              setRememberPassword(false);
+              setForm((f) => ({ ...f, password: "" }));
+              pushToast({
+                tone: "warn",
+                title: "Saved credentials expired",
+                message: "Cleared the saved password. Please re-enter it.",
+              });
+            });
+        } else {
+          setCredentialStatus("unknown");
+        }
+      })
+      .catch(() => {
+        setCredentialStatus("unknown");
+        setHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [side, pushToast]);
+
+  const setExport = useConfigStore((s) => s.setExport);
+  useEffect(() => {
+    if (side === "source" && slice.selectedTable) {
+      setExport({ file_stem: `matches_${slice.selectedTable}` });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slice.selectedTable]);
+
+  async function onConnect() {
+    setLoading(side, true);
+    setError(side, null);
+    try {
+      const sess = await connectDb(form);
+      setSession(side, sess);
+      setLatency(sess.latency_ms ?? null);
+      const tables = await listTables(sess.session_id);
+      setTables(side, tables);
+
+      const rec: PersistedConnection = {
+        version: 1,
+        host: form.host,
+        port: form.port,
+        username: form.username,
+        database: form.database,
+        table: savedTable,
+        column_mapping: slice.columnMapping,
+        password_saved: rememberPassword,
+        password: rememberPassword ? form.password : null,
+        last_connected_unix_ms: Date.now(),
+      };
+      savePersistedConnection(side, rec).catch(() => {
+        pushToast({
+          tone: "warn",
+          title: "Could not save connection",
+          message:
+            "Local store write failed. Re-enter credentials next launch.",
+        });
+      });
+
+      if (savedTable && tables.some((t) => t.name === savedTable)) {
+        await onSelectTable(savedTable, sess.session_id);
+      }
+
+      pushToast({
+        tone: "success",
+        title: `${capitalize(side)} connected`,
+        message: `${tables.length} tables visible · ${
+          sess.latency_ms ?? "?"
+        } ms`,
+      });
+    } catch (err: unknown) {
+      const msg = errMsg(err);
+      setError(side, msg);
+      const looksLikeAuth = /access denied|password|auth/i.test(msg);
+      if (looksLikeAuth && rememberPassword) {
+        await clearPersistedPassword(side).catch(() => {});
+        setRememberPassword(false);
+        setForm((f) => ({ ...f, password: "" }));
+        pushToast({
+          tone: "warn",
+          title: "Saved credentials expired",
+          message: "Cleared the saved password. Please re-enter it.",
+        });
+      } else {
+        pushToast({ tone: "error", title: "Connection failed", message: msg });
+      }
+    } finally {
+      setLoading(side, false);
+    }
+  }
+
+  async function onDisconnect() {
+    if (!slice.session) return;
+    try {
+      await disconnectDb(slice.session.session_id);
+    } catch {
+      /* swallow - server may already be torn down */
+    }
+    useConnectionStore.getState().resetSide(side);
+    setLatency(null);
+  }
+
+  async function onSelectTable(table: string, sessionIdOverride?: string) {
+    const sid = sessionIdOverride ?? slice.session?.session_id;
+    if (!sid) return;
+    setSelectedTable(side, table);
+    setColumns(side, null);
+    setRowCount(side, null);
+    setSavedTable(table);
+    try {
+      const [cols, count] = await Promise.all([
+        getTableColumns(sid, table),
+        getRowCount(sid, table).catch(() => null),
+      ]);
+      setColumns(side, cols);
+      setRowCount(side, count ?? null);
+      loadPersistedConnection(side).then((rec) => {
+        if (rec) {
+          rec.table = table;
+          if (rec.table === table) {
+            setColumnMapping(side, rec.column_mapping ?? null);
+          }
+          savePersistedConnection(side, rec).catch(() => {});
+        }
+      });
+    } catch (err: unknown) {
+      pushToast({
+        tone: "warn",
+        title: "Schema discovery failed",
+        message: errMsg(err),
+      });
+    }
+  }
+
+  async function onPing() {
+    if (!slice.session) return;
+    try {
+      const ms = await testConnection(slice.session.session_id);
+      setLatency(ms);
+      pushToast({
+        tone: "info",
+        title: `${capitalize(side)} ping ok`,
+        message: `${ms} ms`,
+        ttlMs: 1500,
+      });
+    } catch (err: unknown) {
+      pushToast({ tone: "error", title: "Ping failed", message: errMsg(err) });
+    }
+  }
+
+  return (
+    <Card className="space-y-4">
+      <div className="flex items-center justify-between">
+        <SectionHeader
+          title={side === "source" ? "Source Database" : "Target Database"}
+          description={
+            side === "source"
+              ? "Authoritative table; matches are written from this side."
+              : "Comparison table; can live in the same or a different database."
+          }
+        />
+        <div className="flex items-center gap-2">
+          {slice.session ? (
+            <Pill tone="ok">
+              <StatusDot tone="ok" /> Connected
+            </Pill>
+          ) : (
+            <Pill tone="mute">
+              <StatusDot tone="mute" /> Idle
+            </Pill>
+          )}
+        </div>
+      </div>
+
+      {hydrated && lastConnectedMs && !slice.session && (
+        <LastConnectedBadge unixMs={lastConnectedMs} />
+      )}
+      {hydrated && !slice.session && credentialStatus !== "unknown" && (
+        <CredentialValidationBadge status={credentialStatus} />
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Host" htmlFor={`host-${side}`} className="col-span-1">
+          <input
+            id={`host-${side}`}
+            className="input"
+            value={form.host}
+            onChange={(e) => setForm({ ...form, host: e.target.value })}
+            disabled={!!slice.session}
+          />
+        </Field>
+        <Field label="Port" htmlFor={`port-${side}`}>
+          <input
+            id={`port-${side}`}
+            type="number"
+            className="input tabular"
+            value={form.port}
+            onChange={(e) =>
+              setForm({ ...form, port: Number(e.target.value || 0) })
+            }
+            disabled={!!slice.session}
+          />
+        </Field>
+        <Field label="User" htmlFor={`user-${side}`}>
+          <input
+            id={`user-${side}`}
+            className="input"
+            value={form.username}
+            onChange={(e) => setForm({ ...form, username: e.target.value })}
+            disabled={!!slice.session}
+          />
+        </Field>
+        <Field label="Password" htmlFor={`pwd-${side}`}>
+          <input
+            id={`pwd-${side}`}
+            className="input"
+            type="password"
+            autoComplete="off"
+            value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+            disabled={!!slice.session}
+          />
+        </Field>
+        <Field label="Database" htmlFor={`db-${side}`} className="col-span-2">
+          <input
+            id={`db-${side}`}
+            className="input"
+            value={form.database}
+            onChange={(e) => setForm({ ...form, database: e.target.value })}
+            disabled={!!slice.session}
+            placeholder="schema_name"
+          />
+        </Field>
+      </div>
+
+      {!slice.session && (
+        <div
+          className="surface-soft p-3 flex items-start gap-3"
+          aria-describedby={`remember-help-${side}`}
+        >
+          <span className="text-warn-400 mt-0.5" aria-hidden>
+            <WarnIcon />
+          </span>
+          <div className="flex-1 min-w-0">
+            <Toggle
+              checked={rememberPassword}
+              onChange={(b) => setRememberPassword(b)}
+              label={
+                <span>
+                  Save password locally{" "}
+                  <span className="text-warn-400 font-normal">
+                    (stored unencrypted)
+                  </span>
+                </span>
+              }
+              description={
+                <span id={`remember-help-${side}`}>
+                  Saves the password in plaintext under the app data directory.
+                  Use only on trusted machines. Off by default.
+                </span>
+              }
+            />
+          </div>
+        </div>
+      )}
+
+      {slice.error && (
+        <div role="alert" className="help-error">
+          {slice.error}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        {!slice.session ? (
+          <Button tone="primary" loading={slice.loading} onClick={onConnect}>
+            Connect
+          </Button>
+        ) : (
+          <>
+            <Button tone="secondary" onClick={onPing}>
+              Ping {latency != null ? `· ${latency} ms` : ""}
+            </Button>
+            <Button tone="ghost" onClick={onDisconnect}>
+              Disconnect
+            </Button>
+          </>
+        )}
+      </div>
+
+      {slice.session && (
+        <div className="surface-soft p-3 space-y-3">
+          <Field label="Table" htmlFor={`table-${side}`}>
+            <select
+              id={`table-${side}`}
+              className="select"
+              value={slice.selectedTable ?? ""}
+              onChange={(e) => onSelectTable(e.target.value)}
+            >
+              <option value="">— select a table —</option>
+              {slice.tables.map((t) => (
+                <option key={t.name} value={t.name}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {slice.selectedTable && slice.columns && (
+            <>
+              <SchemaQuality
+                columns={slice.columns}
+                rowCount={slice.rowCount}
+              />
+              <ColumnMapper
+                columns={slice.columns}
+                value={slice.columnMapping}
+                onChange={(mapping) => {
+                  setColumnMapping(side, mapping);
+                  loadPersistedConnection(side).then((rec) => {
+                    if (rec) {
+                      rec.column_mapping = mapping;
+                      savePersistedConnection(side, rec).catch(() => {});
+                    }
+                  });
+                }}
+              />
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function LastConnectedBadge({ unixMs }: { unixMs: number }) {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const t = window.setTimeout(() => setVisible(false), 5000);
+    return () => window.clearTimeout(t);
+  }, []);
+  if (!visible) return null;
+  const d = new Date(unixMs);
+  const dateStr = d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+  const timeStr = d.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return (
+    <div className="text-2xs text-ink-500 animate-fade-in">
+      Restored from last session · {dateStr} {timeStr}
+    </div>
+  );
+}
+
+function CredentialValidationBadge({
+  status,
+}: {
+  status: Exclude<CredentialStatus, "unknown">;
+}) {
+  const tone =
+    status === "valid" ? "ok" : status === "expired" ? "danger" : "info";
+  const label =
+    status === "valid"
+      ? "Saved credentials still valid"
+      : status === "expired"
+        ? "Saved credentials expired"
+        : "Checking saved credentials";
+  return (
+    <div
+      className="text-2xs text-ink-400 flex items-center gap-2"
+      aria-live="polite"
+    >
+      <StatusDot tone={tone} />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function errMsg(err: unknown): string {
+  if (typeof err === "object" && err && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
+}
+
+function WarnIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}

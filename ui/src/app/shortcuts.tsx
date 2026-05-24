@@ -131,10 +131,12 @@ async function triggerStart(
     {
       session_id: connState.source.session!.session_id,
       table: connState.source.selectedTable!,
+      column_mapping: connState.source.columnMapping,
     },
     {
       session_id: connState.target.session!.session_id,
       table: connState.target.selectedTable!,
+      column_mapping: connState.target.columnMapping,
     },
     {
       hasBarangay:

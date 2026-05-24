@@ -2,6 +2,7 @@ use crate::commands::database::is_safe_ident;
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, TauriEventSink};
 use name_matcher::db::get_person_rows;
+use name_matcher::db::schema::get_person_rows_mapped;
 use name_matcher::models::Person;
 use name_matcher::run_service::dto::{JobStateDto, JobSummaryDto, RunConfigDto, TableSelectionDto};
 use name_matcher::run_service::{CancelToken, EventSink, RunService};
@@ -32,6 +33,8 @@ pub async fn start_matching(
             config.target.table
         )));
     }
+    validate_mapping_idents("source", config.source.column_mapping.as_ref())?;
+    validate_mapping_idents("target", config.target.column_mapping.as_ref())?;
     if config.export.output_directory.trim().is_empty() {
         return Err(AppError::Validation("output directory is required".into()));
     }
@@ -77,13 +80,23 @@ pub async fn start_matching(
             let tgt_pool = tgt_pool.clone();
             let src_table = src.table.clone();
             let tgt_table = tgt.table.clone();
+            let src_mapping = src.column_mapping.clone();
+            let tgt_mapping = tgt.column_mapping.clone();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
             let (t1, t2): (Vec<Person>, Vec<Person>) = rt.block_on(async move {
-                let t1 = get_person_rows(&src_pool, &src_table).await?;
-                let t2 = get_person_rows(&tgt_pool, &tgt_table).await?;
+                let t1 = if src_mapping.is_some() {
+                    get_person_rows_mapped(&src_pool, &src_table, src_mapping.as_ref()).await?
+                } else {
+                    get_person_rows(&src_pool, &src_table).await?
+                };
+                let t2 = if tgt_mapping.is_some() {
+                    get_person_rows_mapped(&tgt_pool, &tgt_table, tgt_mapping.as_ref()).await?
+                } else {
+                    get_person_rows(&tgt_pool, &tgt_table).await?
+                };
                 anyhow::Ok((t1, t2))
             })?;
             Ok((t1, t2, src.table.clone(), tgt.table.clone()))
@@ -92,6 +105,43 @@ pub async fn start_matching(
 
     let handle = RunService::start(config, registry, store, sink, loader);
     Ok(handle.job_id.clone())
+}
+
+fn validate_mapping_idents(
+    side: &str,
+    mapping: Option<&name_matcher::models::ColumnMapping>,
+) -> AppResult<()> {
+    let Some(mapping) = mapping else {
+        return Ok(());
+    };
+    let required = [
+        ("id", mapping.id.as_str()),
+        ("first_name", mapping.first_name.as_str()),
+        ("last_name", mapping.last_name.as_str()),
+        ("birthdate", mapping.birthdate.as_str()),
+    ];
+    for (field, value) in required {
+        if !is_safe_ident(value) {
+            return Err(AppError::Validation(format!(
+                "{side} mapping field {field} contains unsafe characters: {value}"
+            )));
+        }
+    }
+    let optional = [
+        ("uuid", mapping.uuid.as_deref()),
+        ("middle_name", mapping.middle_name.as_deref()),
+        ("hh_id", mapping.hh_id.as_deref()),
+    ];
+    for (field, value) in optional {
+        if let Some(value) = value {
+            if !is_safe_ident(value) {
+                return Err(AppError::Validation(format!(
+                    "{side} mapping field {field} contains unsafe characters: {value}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

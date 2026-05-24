@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  ColumnMappingDto,
   DbSessionDto,
   TableColumnsDto,
   TableInfoDto,
@@ -11,6 +12,7 @@ interface SideState {
   session: DbSessionDto | null;
   tables: TableInfoDto[];
   selectedTable: string | null;
+  columnMapping: ColumnMappingDto | null;
   columns: TableColumnsDto | null;
   rowCount: number | null;
   loading: boolean;
@@ -21,6 +23,7 @@ const emptySide: SideState = {
   session: null,
   tables: [],
   selectedTable: null,
+  columnMapping: null,
   columns: null,
   rowCount: null,
   loading: false,
@@ -35,6 +38,10 @@ interface ConnectionStore {
   setSession: (side: SessionSide, session: DbSessionDto | null) => void;
   setTables: (side: SessionSide, tables: TableInfoDto[]) => void;
   setSelectedTable: (side: SessionSide, table: string | null) => void;
+  setColumnMapping: (
+    side: SessionSide,
+    mapping: ColumnMappingDto | null,
+  ) => void;
   setColumns: (side: SessionSide, columns: TableColumnsDto | null) => void;
   setRowCount: (side: SessionSide, count: number | null) => void;
   resetSide: (side: SessionSide) => void;
@@ -65,8 +72,19 @@ export const useConnectionStore = create<ConnectionStore>((set) => ({
     set(
       (s) =>
         ({
-          [side]: { ...s[side], selectedTable, columns: null, rowCount: null },
+          [side]: {
+            ...s[side],
+            selectedTable,
+            columnMapping: null,
+            columns: null,
+            rowCount: null,
+          },
         }) as Partial<ConnectionStore>,
+    ),
+  setColumnMapping: (side, columnMapping) =>
+    set(
+      (s) =>
+        ({ [side]: { ...s[side], columnMapping } }) as Partial<ConnectionStore>,
     ),
   setColumns: (side, columns) =>
     set(

@@ -1,5 +1,6 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import type { SessionSide } from "@/shared/stores/connectionStore";
+import type { ColumnMappingDto } from "@/shared/tauri/types";
 
 /**
  * Persisted connection record. The schema is versioned so that future
@@ -19,6 +20,7 @@ export interface PersistedConnection {
   username: string;
   database: string;
   table?: string | null;
+  column_mapping?: ColumnMappingDto | null;
   /** True when the user explicitly opted in to local password storage. */
   password_saved: boolean;
   /** Plaintext password — only present when `password_saved === true`. */

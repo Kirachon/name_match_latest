@@ -79,10 +79,12 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
       {
         session_id: conn.source.session!.session_id,
         table: conn.source.selectedTable!,
+        column_mapping: conn.source.columnMapping,
       },
       {
         session_id: conn.target.session!.session_id,
         table: conn.target.selectedTable!,
+        column_mapping: conn.target.columnMapping,
       },
       {
         hasBarangay:

@@ -17,9 +17,20 @@ export const DbCredentialsSchema = z.object({
 
 // ---------- Run config (deep validation, dependency-aware) ----------
 
+const ColumnMappingSchema = z.object({
+  id: z.string().min(1, "Map an ID column"),
+  uuid: z.string().min(1).nullable().optional(),
+  first_name: z.string().min(1, "Map a first name column"),
+  middle_name: z.string().min(1).nullable().optional(),
+  last_name: z.string().min(1, "Map a last name column"),
+  birthdate: z.string().min(1, "Map a birthdate column"),
+  hh_id: z.string().min(1).nullable().optional(),
+});
+
 const TableSelectionSchema = z.object({
   session_id: z.string().min(1, "Connect to a database first"),
   table: z.string().min(1, "Select a table"),
+  column_mapping: ColumnMappingSchema.nullable().optional(),
 });
 
 const GpuOptionsSchema = z.object({

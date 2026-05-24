@@ -561,18 +561,94 @@ pub async fn get_person_rows_mapped(
     table: &str,
     mapping: Option<&ColumnMapping>,
 ) -> Result<Vec<Person>> {
+    use std::collections::{HashMap, HashSet};
+
     super::schema::validate_ident(table)?;
-    let select = build_select_list(mapping)?;
-    let sql = format!(
-        "SELECT {select} FROM `{table}`",
-        select = select,
-        table = table
-    );
-    let rows: Vec<Person> = sqlx::query_as::<MySql, Person>(&sql)
+    let database = extract_database_from_pool(pool).await?;
+    let all_columns = get_all_table_columns(pool, &database, table).await?;
+    if all_columns.is_empty() {
+        let select = build_select_list(mapping)?;
+        let sql = format!(
+            "SELECT {select} FROM `{table}`",
+            select = select,
+            table = table
+        );
+        let rows: Vec<Person> = sqlx::query_as::<MySql, Person>(&sql)
+            .fetch_all(pool)
+            .await
+            .with_context(|| format!("Failed to fetch rows from {} (mapped)", table))?;
+        return Ok(rows);
+    }
+
+    let m = mapping.cloned().unwrap_or_default();
+    let mut mapped_cols = HashSet::new();
+    for col in [
+        Some(m.id.as_str()),
+        m.uuid.as_deref(),
+        Some(m.first_name.as_str()),
+        m.middle_name.as_deref(),
+        Some(m.last_name.as_str()),
+        Some(m.birthdate.as_str()),
+        m.hh_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        mapped_cols.insert(col.to_string());
+    }
+
+    let mut select_parts = vec![build_select_list(Some(&m))?];
+    for col in &all_columns {
+        if !mapped_cols.contains(col) {
+            validate_ident(col)?;
+            select_parts.push(format!("`{}` AS `extra_{}`", col, col));
+        }
+    }
+
+    let sql = format!("SELECT {} FROM `{}`", select_parts.join(", "), table);
+    let rows = sqlx::query(&sql)
         .fetch_all(pool)
         .await
         .with_context(|| format!("Failed to fetch rows from {} (mapped)", table))?;
-    Ok(rows)
+
+    let mut persons = Vec::new();
+    for row in rows {
+        let hh_id: Option<String> = row
+            .try_get::<Option<i64>, _>("hh_id")
+            .ok()
+            .flatten()
+            .map(|v| v.to_string())
+            .or_else(|| row.try_get::<Option<String>, _>("hh_id").ok().flatten());
+        let mut person = Person {
+            id: row.try_get("id").unwrap_or(0),
+            uuid: row.try_get("uuid").ok(),
+            first_name: row.try_get("first_name").ok(),
+            middle_name: row.try_get("middle_name").ok(),
+            last_name: row.try_get("last_name").ok(),
+            birthdate: row.try_get("birthdate").ok(),
+            hh_id,
+            extra_fields: HashMap::new(),
+        };
+        for col in &all_columns {
+            if mapped_cols.contains(col) {
+                continue;
+            }
+            let alias = format!("extra_{}", col);
+            if let Ok(value) = row.try_get::<String, _>(alias.as_str()) {
+                person.extra_fields.insert(col.clone(), value);
+            } else if let Ok(value) = row.try_get::<i64, _>(alias.as_str()) {
+                person.extra_fields.insert(col.clone(), value.to_string());
+            } else if let Ok(value) = row.try_get::<f64, _>(alias.as_str()) {
+                person.extra_fields.insert(col.clone(), value.to_string());
+            } else if let Ok(value) = row.try_get::<bool, _>(alias.as_str()) {
+                person.extra_fields.insert(col.clone(), value.to_string());
+            } else if let Ok(Some(value)) = row.try_get::<Option<String>, _>(alias.as_str()) {
+                person.extra_fields.insert(col.clone(), value);
+            }
+        }
+        persons.push(person);
+    }
+    Ok(persons)
 }
 
 pub async fn get_person_count_where(

@@ -21,6 +21,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub use crate::models::ColumnMapping as ColumnMappingDto;
+
 /// Algorithm choices exposed to the UI. The numeric "Option N" naming used in
 /// the legacy egui GUI is preserved in the variant docs so operators can
 /// cross-reference release notes.
@@ -161,6 +163,8 @@ pub struct TableColumnsDto {
 pub struct TableSelectionDto {
     pub session_id: String,
     pub table: String,
+    #[serde(default)]
+    pub column_mapping: Option<ColumnMappingDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
