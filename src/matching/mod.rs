@@ -14,6 +14,20 @@ use crate::matching::birthdate_matcher::birthdate_matches;
 use crate::matching::birthdate_matcher::{birthdate_keys, match_level_10, match_level_11};
 use strsim::{jaro_winkler, levenshtein};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreBreakdown {
+    pub supported: bool,
+    pub algorithm: String,
+    pub case_label: Option<String>,
+    pub confidence: Option<f32>,
+    pub levenshtein_pct: Option<f32>,
+    pub jaro_winkler_pct: Option<f32>,
+    pub metaphone_pct: Option<f32>,
+    pub birthdate_match: Option<bool>,
+    pub birthdate_swap_used: bool,
+    pub message: Option<String>,
+}
+
 #[cfg(feature = "gpu")]
 pub mod gpu_config;
 
@@ -124,6 +138,115 @@ fn fuzzy_compare_names_new(
     }
 
     None
+}
+
+pub fn explain_pair_fuzzy(
+    p1: &Person,
+    p2: &Person,
+    no_middle: bool,
+    allow_swap: bool,
+) -> ScoreBreakdown {
+    let birthdate_match = match (p1.birthdate, p2.birthdate) {
+        (Some(d1), Some(d2)) => Some(
+            d1 == d2
+                || crate::matching::birthdate_matcher::birthdate_matches_naive(d1, d2, allow_swap),
+        ),
+        _ => None,
+    };
+    let birthdate_swap_used = match (p1.birthdate, p2.birthdate) {
+        (Some(d1), Some(d2)) => {
+            d1 != d2
+                && crate::matching::birthdate_matcher::birthdate_matches_naive(d1, d2, allow_swap)
+        }
+        _ => false,
+    };
+    if birthdate_match != Some(true) {
+        return ScoreBreakdown {
+            supported: true,
+            algorithm: if no_middle {
+                "fuzzy-no-middle"
+            } else {
+                "fuzzy"
+            }
+            .to_string(),
+            case_label: None,
+            confidence: None,
+            levenshtein_pct: None,
+            jaro_winkler_pct: None,
+            metaphone_pct: None,
+            birthdate_match,
+            birthdate_swap_used,
+            message: Some("Birthdates do not match for this fuzzy rule.".to_string()),
+        };
+    }
+
+    let (full1, full2) = if no_middle {
+        (
+            normalize_simple(&format!(
+                "{} {}",
+                p1.first_name.as_deref().unwrap_or(""),
+                p1.last_name.as_deref().unwrap_or("")
+            )),
+            normalize_simple(&format!(
+                "{} {}",
+                p2.first_name.as_deref().unwrap_or(""),
+                p2.last_name.as_deref().unwrap_or("")
+            )),
+        )
+    } else {
+        (
+            normalize_simple(&format!(
+                "{} {} {}",
+                p1.first_name.as_deref().unwrap_or(""),
+                p1.middle_name.as_deref().unwrap_or(""),
+                p1.last_name.as_deref().unwrap_or("")
+            )),
+            normalize_simple(&format!(
+                "{} {} {}",
+                p2.first_name.as_deref().unwrap_or(""),
+                p2.middle_name.as_deref().unwrap_or(""),
+                p2.last_name.as_deref().unwrap_or("")
+            )),
+        )
+    };
+    let lev = sim_levenshtein_pct(&full1, &full2);
+    let jw = jaro_winkler(&full1, &full2) * 100.0;
+    let mp = metaphone_pct(&full1, &full2);
+    let compared = if no_middle {
+        fuzzy_compare_names_no_mid(
+            p1.first_name.as_deref(),
+            p1.last_name.as_deref(),
+            p2.first_name.as_deref(),
+            p2.last_name.as_deref(),
+        )
+    } else {
+        fuzzy_compare_names_new(
+            p1.first_name.as_deref(),
+            p1.middle_name.as_deref(),
+            p1.last_name.as_deref(),
+            p2.first_name.as_deref(),
+            p2.middle_name.as_deref(),
+            p2.last_name.as_deref(),
+        )
+    };
+
+    ScoreBreakdown {
+        supported: true,
+        algorithm: if no_middle {
+            "fuzzy-no-middle"
+        } else {
+            "fuzzy"
+        }
+        .to_string(),
+        case_label: compared.as_ref().map(|(_, label)| label.clone()),
+        confidence: compared.map(|(score, _)| score as f32),
+        levenshtein_pct: Some(lev as f32),
+        jaro_winkler_pct: Some(jw as f32),
+        metaphone_pct: Some(mp as f32),
+        birthdate_match,
+        birthdate_swap_used,
+        message: None,
+    }
 }
 
 fn compare_persons_new_with_swap(

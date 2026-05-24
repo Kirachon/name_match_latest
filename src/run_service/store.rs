@@ -10,6 +10,7 @@
 use super::dto::{
     AlgorithmDto, JobStateDto, JobSummaryDto, MatchPairDto, ResultPageDto, ResultPageRequestDto,
 };
+use crate::models::Person;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
@@ -30,6 +31,8 @@ impl Default for ResultStoreConfig {
 pub struct StoredJob {
     pub summary: JobSummaryDto,
     pub rows: Vec<MatchPairDto>,
+    pub source_people: Vec<Person>,
+    pub target_people: Vec<Person>,
     pub last_accessed_unix_ms: u64,
 }
 
@@ -82,6 +85,8 @@ impl ResultStore {
                     finished_at_unix_ms: None,
                 },
                 rows: Vec::new(),
+                source_people: Vec::new(),
+                target_people: Vec::new(),
                 last_accessed_unix_ms: started_at_unix_ms,
             },
         );
@@ -94,6 +99,24 @@ impl ResultStore {
             Some(slot) => {
                 slot.summary.matches_found = rows.len() as u64;
                 slot.rows = rows;
+                slot.last_accessed_unix_ms = now_ms();
+                Ok(())
+            }
+            None => bail!("Unknown job id: {}", job_id),
+        }
+    }
+
+    pub fn set_person_snapshots(
+        &self,
+        job_id: &str,
+        source_people: Vec<Person>,
+        target_people: Vec<Person>,
+    ) -> Result<()> {
+        let mut g = self.inner.lock();
+        match g.get_mut(job_id) {
+            Some(slot) => {
+                slot.source_people = source_people;
+                slot.target_people = target_people;
                 slot.last_accessed_unix_ms = now_ms();
                 Ok(())
             }

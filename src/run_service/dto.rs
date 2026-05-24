@@ -541,6 +541,34 @@ pub struct MatchPairDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainPairRequestDto {
+    pub job_id: String,
+    pub source_id: i64,
+    pub target_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreBreakdownDto {
+    pub supported: bool,
+    pub algorithm: String,
+    #[serde(default)]
+    pub case_label: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub levenshtein_pct: Option<f32>,
+    #[serde(default)]
+    pub jaro_winkler_pct: Option<f32>,
+    #[serde(default)]
+    pub metaphone_pct: Option<f32>,
+    #[serde(default)]
+    pub birthdate_match: Option<bool>,
+    pub birthdate_swap_used: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultPageRequestDto {
     pub job_id: String,
     /// Cursor-based page index. 0 = first page.

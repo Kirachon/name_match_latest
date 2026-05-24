@@ -8,10 +8,12 @@ import type {
   DbSessionDto,
   ExportRequestDto,
   ExportResultDto,
+  ExplainPairRequestDto,
   JobSummaryDto,
   ResultPageDto,
   ResultPageRequestDto,
   RunConfigDto,
+  ScoreBreakdownDto,
   SystemInfoDto,
   TableColumnsDto,
   TableInfoDto,
@@ -95,5 +97,7 @@ export const forgetMatchingJob = (jobId: string) =>
 
 export const getResultsPage = (request: ResultPageRequestDto) =>
   call<ResultPageDto>("get_results_page", { request });
+export const explainPair = (request: ExplainPairRequestDto) =>
+  call<ScoreBreakdownDto>("explain_pair", { request });
 export const exportResults = (request: ExportRequestDto) =>
   call<ExportResultDto>("export_results", { request });

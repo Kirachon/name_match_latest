@@ -1,7 +1,8 @@
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use name_matcher::run_service::dto::{
-    ExportFormatDto, ExportRequestDto, ExportResultDto, ResultPageDto, ResultPageRequestDto,
+    AlgorithmDto, ExplainPairRequestDto, ExportFormatDto, ExportRequestDto, ExportResultDto,
+    ResultPageDto, ResultPageRequestDto, ScoreBreakdownDto,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -17,6 +18,61 @@ pub fn get_results_page(
         .page(&request)
         .map_err(|e| AppError::Validation(e.to_string()))?;
     Ok(page)
+}
+
+#[tauri::command]
+pub fn explain_pair(
+    request: ExplainPairRequestDto,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<ScoreBreakdownDto> {
+    let snap = state
+        .results
+        .snapshot(&request.job_id)
+        .ok_or_else(|| AppError::Validation(format!("unknown job_id: {}", request.job_id)))?;
+    let source = snap
+        .source_people
+        .iter()
+        .find(|person| person.id == request.source_id)
+        .ok_or_else(|| AppError::Validation("source person snapshot not found".into()))?;
+    let target = snap
+        .target_people
+        .iter()
+        .find(|person| person.id == request.target_id)
+        .ok_or_else(|| AppError::Validation("target person snapshot not found".into()))?;
+    match snap.summary.algorithm {
+        AlgorithmDto::Fuzzy | AlgorithmDto::FuzzyNoMiddle => {
+            let b = name_matcher::matching::explain_pair_fuzzy(
+                source,
+                target,
+                matches!(snap.summary.algorithm, AlgorithmDto::FuzzyNoMiddle),
+                true,
+            );
+            Ok(ScoreBreakdownDto {
+                supported: b.supported,
+                algorithm: b.algorithm,
+                case_label: b.case_label,
+                confidence: b.confidence,
+                levenshtein_pct: b.levenshtein_pct,
+                jaro_winkler_pct: b.jaro_winkler_pct,
+                metaphone_pct: b.metaphone_pct,
+                birthdate_match: b.birthdate_match,
+                birthdate_swap_used: b.birthdate_swap_used,
+                message: b.message,
+            })
+        }
+        _ => Ok(ScoreBreakdownDto {
+            supported: false,
+            algorithm: format!("{:?}", snap.summary.algorithm),
+            case_label: None,
+            confidence: None,
+            levenshtein_pct: None,
+            jaro_winkler_pct: None,
+            metaphone_pct: None,
+            birthdate_match: None,
+            birthdate_swap_used: false,
+            message: Some("Explanation is currently available for Quick Match fuzzy modes only.".into()),
+        }),
+    }
 }
 
 #[tauri::command]

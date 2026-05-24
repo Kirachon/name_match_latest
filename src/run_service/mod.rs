@@ -518,6 +518,19 @@ fn run_worker(
             tgt_label
         ),
     });
+    if let Err(e) = store
+        .set_person_snapshots(&job_id, t1.clone(), t2.clone())
+        .context("person snapshot store write")
+    {
+        fail_state(
+            &state,
+            sink_ref,
+            Some(store.as_ref()),
+            &job_id,
+            format!("Result store failed: {e}"),
+        );
+        return;
+    }
 
     // 2) Resolve job-local matching options. Runtime jobs use a scoped Rayon
     // pool so one run cannot mutate process-wide thread settings for another.

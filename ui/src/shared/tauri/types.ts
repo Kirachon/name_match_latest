@@ -411,6 +411,25 @@ export interface MatchPairDto {
   match_method?: string | null;
 }
 
+export interface ExplainPairRequestDto {
+  job_id: string;
+  source_id: number;
+  target_id: number;
+}
+
+export interface ScoreBreakdownDto {
+  supported: boolean;
+  algorithm: string;
+  case_label?: string | null;
+  confidence?: number | null;
+  levenshtein_pct?: number | null;
+  jaro_winkler_pct?: number | null;
+  metaphone_pct?: number | null;
+  birthdate_match?: boolean | null;
+  birthdate_swap_used: boolean;
+  message?: string | null;
+}
+
 export interface ResultPageRequestDto {
   job_id: string;
   page: number;

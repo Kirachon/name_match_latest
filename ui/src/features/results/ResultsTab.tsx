@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import {
+  explainPair,
   exportResults,
   forgetMatchingJob,
   getMatchingStatus,
@@ -28,10 +29,13 @@ import { JOB_STATE_TERMINAL } from "@/shared/tauri/types";
 import type {
   ExportFormatDto,
   JobSummaryDto,
+  MatchPairDto,
   ResultPageDto,
+  ScoreBreakdownDto,
 } from "@/shared/tauri/types";
 import { useDebounced } from "@/shared/hooks";
 import { ResultsTable } from "./ResultsTable";
+import { ExplanationPanel } from "./ExplanationPanel";
 
 const PAGE_LIMIT = 1000;
 
@@ -47,6 +51,10 @@ export function ResultsTab() {
   const resetResultView = useResultsStore((s) => s.resetJob);
   const [summary, setSummary] = useState<JobSummaryDto | null>(null);
   const [page, setPage] = useState<ResultPageDto | null>(null);
+  const [selectedRow, setSelectedRow] = useState<MatchPairDto | null>(null);
+  const [breakdown, setBreakdown] = useState<ScoreBreakdownDto | null>(null);
+  const [explainLoading, setExplainLoading] = useState(false);
+  const [explainError, setExplainError] = useState<string | null>(null);
   const debouncedSearch = useDebounced(viewState.search, 200);
   const debouncedConf = useDebounced(viewState.minConf, 200);
   const [loading, setLoading] = useState(false);
@@ -125,6 +133,39 @@ export function ResultsTab() {
     pushToast,
     patchResultView,
   ]);
+
+  useEffect(() => {
+    if (!activeJobId || !selectedRow) {
+      setBreakdown(null);
+      setExplainError(null);
+      return;
+    }
+    let cancelled = false;
+    setExplainLoading(true);
+    setExplainError(null);
+    explainPair({
+      job_id: activeJobId,
+      source_id: selectedRow.source_id,
+      target_id: selectedRow.target_id,
+    })
+      .then((result) => {
+        if (!cancelled) setBreakdown(result);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setExplainError(
+          typeof err === "object" && err && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setExplainLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobId, selectedRow]);
 
   if (!activeJobId) {
     return (
@@ -415,7 +456,24 @@ export function ResultsTab() {
             </Button>
           </div>
         </div>
-        <ResultsTable rows={page?.rows ?? []} />
+        <div className="flex">
+          <div className="min-w-0 flex-1">
+            <ResultsTable
+              rows={page?.rows ?? []}
+              selectedRowId={selectedRow?.row_id ?? null}
+              onSelectRow={setSelectedRow}
+            />
+          </div>
+          {selectedRow && (
+            <ExplanationPanel
+              row={selectedRow}
+              breakdown={breakdown}
+              loading={explainLoading}
+              error={explainError}
+              onClose={() => setSelectedRow(null)}
+            />
+          )}
+        </div>
       </Card>
     </div>
   );

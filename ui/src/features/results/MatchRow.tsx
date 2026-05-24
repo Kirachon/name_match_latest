@@ -5,15 +5,28 @@ export function MatchRow({
   row,
   top,
   height,
+  selected,
+  onSelect,
 }: {
   row: MatchPairDto;
   top: number;
   height: number;
+  selected: boolean;
+  onSelect: () => void;
 }) {
   return (
     <div
       role="row"
-      className="data-row"
+      tabIndex={0}
+      aria-selected={selected}
+      className={cx("data-row cursor-pointer", selected && "bg-accent-500/10")}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
       style={{
         position: "absolute",
         top: 0,

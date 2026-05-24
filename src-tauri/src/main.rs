@@ -71,6 +71,7 @@ fn main() {
             commands::forget_matching_job,
             // Results / export (T9)
             commands::get_results_page,
+            commands::explain_pair,
             commands::export_results,
         ])
         .run(tauri::generate_context!())

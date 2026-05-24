@@ -5,7 +5,15 @@ import { MatchRow } from "./MatchRow";
 
 const COL_TEMPLATE = "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px";
 
-export function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
+export function ResultsTable({
+  rows,
+  selectedRowId,
+  onSelectRow,
+}: {
+  rows: MatchPairDto[];
+  selectedRowId: number | null;
+  onSelectRow: (row: MatchPairDto) => void;
+}) {
   const parentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
@@ -49,7 +57,14 @@ export function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
           const r = rows[vi.index];
           if (!r) return null;
           return (
-            <MatchRow key={r.row_id} row={r} top={vi.start} height={vi.size} />
+            <MatchRow
+              key={r.row_id}
+              row={r}
+              top={vi.start}
+              height={vi.size}
+              selected={selectedRowId === r.row_id}
+              onSelect={() => onSelectRow(r)}
+            />
           );
         })}
       </div>
