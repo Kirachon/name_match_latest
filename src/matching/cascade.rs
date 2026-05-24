@@ -91,6 +91,9 @@ pub struct CascadeConfig {
     /// None = use default device (typically device 0).
     /// Only used when compute_backend = Gpu.
     pub gpu_device_id: Option<usize>,
+    /// GPU memory budget in MB for fuzzy L10/L11 tiling.
+    /// None lets the GPU scorer auto-size from current free VRAM.
+    pub gpu_mem_budget_mb: Option<u64>,
 }
 
 impl Default for CascadeConfig {
@@ -104,6 +107,7 @@ impl Default for CascadeConfig {
             exclusion_mode: CascadeExclusionMode::Exclusive,
             compute_backend: ComputeBackend::Cpu,
             gpu_device_id: None,
+            gpu_mem_budget_mb: None,
         }
     }
 }
@@ -269,7 +273,12 @@ fn run_fuzzy_level(
     cfg: &AdvConfig,
     backend: ComputeBackend,
     gpu_device_id: Option<usize>,
+    gpu_mem_budget_mb: Option<u64>,
+    on_engine_progress: &(impl Fn(ProgressUpdate) + Sync),
 ) -> Vec<MatchPair> {
+    #[cfg(not(feature = "gpu"))]
+    let _ = (gpu_device_id, gpu_mem_budget_mb, on_engine_progress);
+
     let use_gpu = matches!(backend, ComputeBackend::Gpu)
         && matches!(
             cfg.level,
@@ -279,17 +288,7 @@ fn run_fuzzy_level(
     if use_gpu {
         #[cfg(feature = "gpu")]
         {
-            let opts = MatchOptions {
-                backend: ComputeBackend::Gpu,
-                gpu: Some(GpuConfig {
-                    device_id: gpu_device_id,
-                    mem_budget_mb: 512, // Conservative default
-                }),
-                progress: ProgressConfig::default(),
-                allow_birthdate_swap: cfg.allow_birthdate_swap,
-            };
-
-            let on_progress = |_u: ProgressUpdate| {};
+            let opts = gpu_match_options_for_level(cfg, gpu_device_id, gpu_mem_budget_mb);
             let gpu_result = match cfg.level {
                 AdvLevel::L10FuzzyBirthdateFullMiddle => {
                     crate::matching::gpu_config::with_oom_cpu_fallback(
@@ -298,7 +297,7 @@ fn run_fuzzy_level(
                                 table1,
                                 table2,
                                 opts,
-                                on_progress,
+                                on_engine_progress,
                             )
                         },
                         || {
@@ -315,7 +314,7 @@ fn run_fuzzy_level(
                                 table1,
                                 table2,
                                 opts,
-                                on_progress,
+                                on_engine_progress,
                             )
                         },
                         || {
@@ -354,6 +353,71 @@ fn run_fuzzy_level(
     let mut matches = advanced_match_inmemory(table1, table2, cfg);
     sort_matches_by_id(&mut matches);
     matches
+}
+
+fn gpu_match_options_for_level(
+    cfg: &AdvConfig,
+    gpu_device_id: Option<usize>,
+    gpu_mem_budget_mb: Option<u64>,
+) -> MatchOptions {
+    MatchOptions {
+        backend: ComputeBackend::Gpu,
+        gpu: Some(GpuConfig {
+            device_id: gpu_device_id,
+            mem_budget_mb: gpu_mem_budget_mb.unwrap_or(0),
+        }),
+        progress: ProgressConfig::default(),
+        // L11 is the no-middle fuzzy pass. Keeping swap off here avoids the
+        // doubled birthdate-key search space and matches the existing GPU
+        // helper used by advanced matching.
+        allow_birthdate_swap: !matches!(cfg.level, AdvLevel::L11FuzzyBirthdateNoMiddle)
+            && cfg.allow_birthdate_swap,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fuzzy_cfg(level: AdvLevel, allow_birthdate_swap: bool) -> AdvConfig {
+        AdvConfig {
+            level,
+            threshold: 0.95,
+            cols: AdvColumns::default(),
+            allow_birthdate_swap,
+        }
+    }
+
+    #[test]
+    fn gpu_options_keep_birthdate_swap_on_l10_only() {
+        let l10 = gpu_match_options_for_level(
+            &fuzzy_cfg(AdvLevel::L10FuzzyBirthdateFullMiddle, true),
+            None,
+            None,
+        );
+        let l11 = gpu_match_options_for_level(
+            &fuzzy_cfg(AdvLevel::L11FuzzyBirthdateNoMiddle, true),
+            None,
+            None,
+        );
+
+        assert!(l10.allow_birthdate_swap);
+        assert!(!l11.allow_birthdate_swap);
+    }
+
+    #[test]
+    fn gpu_options_preserve_user_vram_budget() {
+        let opts = gpu_match_options_for_level(
+            &fuzzy_cfg(AdvLevel::L10FuzzyBirthdateFullMiddle, false),
+            Some(1),
+            Some(2048),
+        );
+        let gpu = opts.gpu.expect("gpu config");
+
+        assert_eq!(gpu.device_id, Some(1));
+        assert_eq!(gpu.mem_budget_mb, 2048);
+        assert!(!opts.allow_birthdate_swap);
+    }
 }
 
 /// Generate output file path for a specific level
@@ -560,6 +624,22 @@ pub fn run_cascade_inmemory<F>(
 where
     F: Fn(CascadeProgress),
 {
+    run_cascade_inmemory_with_engine_progress(table1, table2, cfg, geo_status, on_progress, |_u| {})
+}
+
+/// Run cascade matching in-memory and surface lower-level fuzzy/GPU progress.
+pub fn run_cascade_inmemory_with_engine_progress<F, G>(
+    table1: &[Person],
+    table2: &[Person],
+    cfg: &CascadeConfig,
+    geo_status: &GeoColumnStatus,
+    on_progress: F,
+    on_engine_progress: G,
+) -> CascadeResult
+where
+    F: Fn(CascadeProgress),
+    G: Fn(ProgressUpdate) + Sync,
+{
     let start = Instant::now();
     let mut entries = Vec::new();
     let mut total_matches = 0usize;
@@ -603,7 +683,7 @@ where
 
     let total_levels = levels_to_run.len();
 
-    for (idx, level_num) in levels_to_run.iter().enumerate() {
+    for level_num in levels_to_run.iter() {
         let level_num = *level_num;
         let desc = level_description(level_num).to_string();
 
@@ -693,6 +773,8 @@ where
                 &adv_cfg,
                 cfg.compute_backend,
                 cfg.gpu_device_id,
+                cfg.gpu_mem_budget_mb,
+                &on_engine_progress,
             )
         } else {
             // L1-L9: exact matching, always CPU

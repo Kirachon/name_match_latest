@@ -350,14 +350,13 @@ fn classify_cached_full(c1: &CpuFuzzyCache, c2: &CpuFuzzyCache) -> Option<(f64, 
 
     let lev = sim_levenshtein_pct(&c1.simple_full, &c2.simple_full);
     let jw = jaro_winkler(&c1.simple_full, &c2.simple_full) * 100.0;
-    let mp = if !c1.dmeta_full.is_empty()
-        && !c2.dmeta_full.is_empty()
-        && c1.dmeta_full == c2.dmeta_full
-    {
-        100.0
-    } else {
-        0.0
-    };
+    let mp =
+        if !c1.dmeta_full.is_empty() && !c2.dmeta_full.is_empty() && c1.dmeta_full == c2.dmeta_full
+        {
+            100.0
+        } else {
+            0.0
+        };
 
     if lev >= 85.0 && jw >= 85.0 && mp == 100.0 {
         let avg = (lev + jw + mp) / 3.0;
@@ -1228,8 +1227,7 @@ fn should_emit_progress(
         *last_emit = Instant::now();
         return true;
     }
-    if processed.saturating_sub(*last_processed) >= min_rows
-        || last_emit.elapsed() >= min_interval
+    if processed.saturating_sub(*last_processed) >= min_rows || last_emit.elapsed() >= min_interval
     {
         *last_processed = processed;
         *last_emit = Instant::now();
@@ -3173,7 +3171,7 @@ mod gpu {
         simple_mid: String,
         simple_last: String,
         phonetic_full: String,
-        dmeta_code: String, // empty if encode failed/panicked/empty
+        dmeta_code: String,        // empty if encode failed/panicked/empty
         dmeta_code_no_mid: String, // empty if encode failed/panicked/empty
     }
 
@@ -3185,10 +3183,7 @@ mod gpu {
         let simple_first = normalize_simple(raw_first);
         let simple_mid = normalize_simple(raw_mid);
         let simple_last = normalize_simple(raw_last);
-        let simple_full = normalize_simple(&format!(
-            "{} {} {}",
-            raw_first, raw_mid, raw_last
-        ));
+        let simple_full = normalize_simple(&format!("{} {} {}", raw_first, raw_mid, raw_last));
         let simple_full_no_mid = normalize_simple(&format!("{} {}", raw_first, raw_last));
         // match metaphone_pct() path: normalize_for_phonetic on the full name string
         let phonetic_full = normalize_for_phonetic(&simple_full);
@@ -3205,8 +3200,7 @@ mod gpu {
         let dmeta_code_no_mid = if phonetic_no_mid.is_empty() {
             String::new()
         } else {
-            match std::panic::catch_unwind(|| DoubleMetaphone::default().encode(&phonetic_no_mid))
-            {
+            match std::panic::catch_unwind(|| DoubleMetaphone::default().encode(&phonetic_no_mid)) {
                 Ok(code) => code.to_string(),
                 Err(_) => String::new(),
             }
@@ -4855,16 +4849,13 @@ mod gpu {
             if use_pinned_tile {
                 let pinned_setup = (|| -> Result<()> {
                     if pinned_flat.as_ref().map(|b| b.len()) != Some(flat_len) {
-                        pinned_flat =
-                            Some(unsafe { hctx.ctx.alloc_pinned::<u8>(flat_len) }?);
+                        pinned_flat = Some(unsafe { hctx.ctx.alloc_pinned::<u8>(flat_len) }?);
                     }
                     if pinned_offsets.as_ref().map(|b| b.len()) != Some(n) {
-                        pinned_offsets =
-                            Some(unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?);
+                        pinned_offsets = Some(unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?);
                     }
                     if pinned_lengths.as_ref().map(|b| b.len()) != Some(n) {
-                        pinned_lengths =
-                            Some(unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?);
+                        pinned_lengths = Some(unsafe { hctx.ctx.alloc_pinned::<i32>(n) }?);
                     }
                     let flat_slice = pinned_flat
                         .as_mut()
@@ -5314,15 +5305,14 @@ mod gpu {
                         continue;
                     }
                     if s1 == s2 {
-                        let bd_match =
-                            match (t1[i].birthdate, t2[j_idx].birthdate) {
-                                (Some(b1), Some(b2)) => {
-                                    let stored = b1.format("%Y-%m-%d").to_string();
-                                    let input = b2.format("%Y-%m-%d").to_string();
-                                    birthdate_matches(&stored, &input, allow_swap)
-                                }
-                                _ => false,
-                            };
+                        let bd_match = match (t1[i].birthdate, t2[j_idx].birthdate) {
+                            (Some(b1), Some(b2)) => {
+                                let stored = b1.format("%Y-%m-%d").to_string();
+                                let input = b2.format("%Y-%m-%d").to_string();
+                                birthdate_matches(&stored, &input, allow_swap)
+                            }
+                            _ => false,
+                        };
                         if bd_match {
                             results.push(MatchPair {
                                 person1: t1[i].clone(),
@@ -7093,34 +7083,32 @@ where
             for (i, p) in rows.iter().enumerate() {
                 let n = &probe_norms[i];
                 if let Some(h) = hash_key_for_np(algo, n) {
-                if let Some(cands) = index.get(&h) {
-                    for cand in cands {
-                        let q = &cand.person;
-                        let n2 = &cand.norm;
-                        let ok = match algo {
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
-                                matches_algo1(n, n2)
-                            }
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
-                                matches_algo2(n, n2)
-                            }
-                            MatchingAlgorithm::Fuzzy
-                            | MatchingAlgorithm::FuzzyNoMiddle
-                            | MatchingAlgorithm::HouseholdGpu
-                            | MatchingAlgorithm::HouseholdGpuOpt6
-                            | MatchingAlgorithm::LevenshteinWeighted => false,
-                        };
-                        if ok {
-                            let pair = if inner_table == table2 {
-                                to_pair(p, q, algo, n, n2)
-                            } else {
-                                to_pair(q, p, algo, n2, n)
+                    if let Some(cands) = index.get(&h) {
+                        for cand in cands {
+                            let q = &cand.person;
+                            let n2 = &cand.norm;
+                            let ok = match algo {
+                                MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => matches_algo1(n, n2),
+                                MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
+                                    matches_algo2(n, n2)
+                                }
+                                MatchingAlgorithm::Fuzzy
+                                | MatchingAlgorithm::FuzzyNoMiddle
+                                | MatchingAlgorithm::HouseholdGpu
+                                | MatchingAlgorithm::HouseholdGpuOpt6
+                                | MatchingAlgorithm::LevenshteinWeighted => false,
                             };
-                            on_match(&pair)?;
-                            written += 1;
+                            if ok {
+                                let pair = if inner_table == table2 {
+                                    to_pair(p, q, algo, n, n2)
+                                } else {
+                                    to_pair(q, p, algo, n2, n)
+                                };
+                                on_match(&pair)?;
+                                written += 1;
+                            }
                         }
                     }
-                }
                 }
             }
         }
@@ -7678,30 +7666,28 @@ where
             for (i, p) in rows.iter().enumerate() {
                 let n = &probe_norms[i];
                 if let Some(h) = hash_key_for_np(algo, n) {
-                if let Some(cands) = index.get(&h) {
-                    for cand in cands {
-                        let q = &cand.person;
-                        let n2 = &cand.norm;
-                        let ok = match algo {
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
-                                matches_algo1(n, n2)
-                            }
-                            MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
-                                matches_algo2(n, n2)
-                            }
-                            _ => false,
-                        };
-                        if ok {
-                            let pair = if inner_is_t2 {
-                                to_pair(p, q, algo, n, n2)
-                            } else {
-                                to_pair(q, p, algo, n2, n)
+                    if let Some(cands) = index.get(&h) {
+                        for cand in cands {
+                            let q = &cand.person;
+                            let n2 = &cand.norm;
+                            let ok = match algo {
+                                MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => matches_algo1(n, n2),
+                                MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
+                                    matches_algo2(n, n2)
+                                }
+                                _ => false,
                             };
-                            on_match(&pair)?;
-                            written += 1;
+                            if ok {
+                                let pair = if inner_is_t2 {
+                                    to_pair(p, q, algo, n, n2)
+                                } else {
+                                    to_pair(q, p, algo, n2, n)
+                                };
+                                on_match(&pair)?;
+                                written += 1;
+                            }
                         }
                     }
-                }
                 }
             }
         }
@@ -8881,8 +8867,7 @@ where
                     budget,
                     64,
                     scfg.gpu_use_pinned_host,
-                )
-                {
+                ) {
                     let mut map: std::collections::HashMap<u64, Vec<usize>> =
                         std::collections::HashMap::new();
                     for (j, &h) in hashes.iter().enumerate() {
@@ -9114,8 +9099,7 @@ where
                                 budget,
                                 64,
                                 scfg.gpu_use_pinned_host,
-                            )
-                            {
+                            ) {
                                 Ok(v) => v,
                                 Err(_) => probe_keys
                                     .iter()
@@ -9968,8 +9952,7 @@ where
                     budget,
                     64,
                     scfg.gpu_use_pinned_host,
-                )
-                {
+                ) {
                     let mut map: std::collections::HashMap<u64, Vec<usize>> =
                         std::collections::HashMap::new();
                     for (j, &h) in hashes.iter().enumerate() {
@@ -10188,8 +10171,7 @@ where
                                 budget,
                                 64,
                                 scfg.gpu_use_pinned_host,
-                            )
-                            {
+                            ) {
                                 Ok(v) => v,
                                 Err(_) => probe_keys
                                     .iter()

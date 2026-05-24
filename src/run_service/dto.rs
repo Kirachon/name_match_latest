@@ -19,6 +19,7 @@
 //!   metadata without the password after the pool is built.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Algorithm choices exposed to the UI. The numeric "Option N" naming used in
 /// the legacy egui GUI is preserved in the variant docs so operators can
@@ -464,16 +465,45 @@ pub struct MatchPairDto {
     pub source_uuid: Option<String>,
     pub source_full_name: String,
     pub source_birthdate: Option<String>,
+    #[serde(default)]
+    pub source_region_name: Option<String>,
+    #[serde(default)]
+    pub source_province_name: Option<String>,
+    #[serde(default)]
+    pub source_city_name: Option<String>,
+    #[serde(default)]
+    pub source_barangay_name: Option<String>,
+    /// Optional full set of non-standard columns from the source table.
+    #[serde(default)]
+    pub source_extra_fields: BTreeMap<String, String>,
     pub target_id: i64,
     pub target_uuid: Option<String>,
     pub target_full_name: String,
     pub target_birthdate: Option<String>,
+    #[serde(default)]
+    pub target_region_name: Option<String>,
+    #[serde(default)]
+    pub target_province_name: Option<String>,
+    #[serde(default)]
+    pub target_city_name: Option<String>,
+    #[serde(default)]
+    pub target_barangay_name: Option<String>,
+    /// Optional full set of non-standard columns from the target table.
+    #[serde(default)]
+    pub target_extra_fields: BTreeMap<String, String>,
     pub confidence: f32,
     pub matched_fields: Vec<String>,
+    /// Plain-language explanation for why the pair was exported.
+    #[serde(default)]
+    pub remarks: Option<String>,
     /// In cascade (Deep Match) runs, the level (1..=11) at which this pair
     /// was first matched. `None` for single-pass (Quick Match) runs.
     #[serde(default)]
     pub matched_at_level: Option<u8>,
+    /// Human-readable cascade method label for Deep Match rows.
+    /// `None` for single-pass (Quick Match) runs.
+    #[serde(default)]
+    pub match_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -530,6 +560,9 @@ pub struct ExportRequestDto {
     /// Minimum confidence (0..=100) for export rows.
     #[serde(default)]
     pub min_confidence: Option<f32>,
+    /// When true, append all non-standard source/target table columns.
+    #[serde(default)]
+    pub include_extra_fields: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

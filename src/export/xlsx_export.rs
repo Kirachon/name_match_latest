@@ -7,8 +7,8 @@ use chrono::{DateTime, FixedOffset, Utc};
 use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook, Worksheet};
 
 use crate::export::{build_match_headers, collect_extra_field_names};
-use crate::matching::{MatchPair, MatchingAlgorithm};
 use crate::matching::advanced_matcher::AdvLevel;
+use crate::matching::{MatchPair, MatchingAlgorithm};
 
 #[derive(Debug, Clone)]
 pub struct SummaryContext {

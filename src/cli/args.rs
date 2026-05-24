@@ -224,7 +224,9 @@ pub fn print_usage(program_name: &str) {
         "  --direct-fuzzy-normalization     Apply Fuzzy-style normalization to Algorithms 1 & 2 before equality checks"
     );
     eprintln!("  NAME_MATCHER_DIRECT_FUZZY_NORMALIZATION=1 to enable the above");
-    eprintln!("  --gpu-streams <N>                Number of CUDA streams for overlap (default 1; set 2+ to enable overlap)");
+    eprintln!(
+        "  --gpu-streams <N>                Number of CUDA streams for overlap (default 1; set 2+ to enable overlap)"
+    );
     eprintln!("  NAME_MATCHER_GPU_STREAMS=<N>     set via environment");
     eprintln!(
         "  --gpu-buffer-pool | --no-gpu-buffer-pool   Reuse device buffers within a run (default off)"

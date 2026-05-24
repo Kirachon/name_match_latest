@@ -32,6 +32,7 @@ export function ConfigureTab({ onAdvance }: ConfigureTabProps) {
       <div className="xl:col-span-2 space-y-5">
         <ModeCard />
         <AlgorithmOrCascadeCard />
+        <MatchOptionsCard />
         <GpuCard />
         <StreamingCard />
         <ExportCard />
@@ -132,8 +133,6 @@ function AlgorithmOrCascadeCard() {
 function AlgorithmCard() {
   const current = useConfigStore((s) => s.algorithm);
   const setAlgorithm = useConfigStore((s) => s.setAlgorithm);
-  const allowSwap = useConfigStore((s) => s.options.allow_birthdate_swap);
-  const setOptions = useConfigStore((s) => s.setOptions);
 
   return (
     <Card>
@@ -154,14 +153,35 @@ function AlgorithmCard() {
           />
         ))}
       </div>
-      <div className="mt-4 pt-4 border-t border-ink-800">
-        <Toggle
-          checked={allowSwap}
-          onChange={(b) => setOptions({ allow_birthdate_swap: b })}
-          label="Allow birthdate month/day swap (L10/L11 parity)"
-          description="Useful when source data may have transposed month/day digits."
-        />
-      </div>
+    </Card>
+  );
+}
+
+function MatchOptionsCard() {
+  const mode = useConfigStore((s) => s.mode);
+  const allowSwap = useConfigStore((s) => s.options.allow_birthdate_swap);
+  const setOptions = useConfigStore((s) => s.setOptions);
+
+  return (
+    <Card>
+      <SectionHeader
+        title="Match options"
+        description={
+          mode === "deep"
+            ? "Shared rules used by Deep Match cascade levels."
+            : "Shared rules used by the selected Quick Match algorithm."
+        }
+      />
+      <Toggle
+        checked={allowSwap}
+        onChange={(b) => setOptions({ allow_birthdate_swap: b })}
+        label="Allow birthdate month/day swap"
+        description={
+          mode === "deep"
+            ? "Lets fuzzy cascade levels L10/L11 treat dates like 1990-04-12 and 1990-12-04 as a possible same birthday."
+            : "Useful when source data may have transposed month/day digits."
+        }
+      />
     </Card>
   );
 }
@@ -209,16 +229,20 @@ function AlgorithmOption({
 function GpuCard() {
   const gpu = useConfigStore((s) => s.gpu);
   const setGpu = useConfigStore((s) => s.setGpu);
+  const mode = useConfigStore((s) => s.mode);
   const algorithm = useConfigStore((s) => s.algorithm);
   const meta = algorithmMeta(algorithm);
   const gpuOff = gpu.mode === "cpu";
+  const isDeep = mode === "deep";
 
   return (
     <Card>
       <SectionHeader
         title="GPU acceleration"
         description={
-          meta.gpuApplicable
+          isDeep
+            ? "Deep Match uses GPU acceleration mainly for fuzzy cascade levels L10/L11. Exact levels L1-L9 remain CPU-style matching."
+            : meta.gpuApplicable
             ? "GPU offload is available for this algorithm. Toggle it off to force CPU."
             : "This algorithm does not benefit from GPU acceleration."
         }
@@ -258,8 +282,12 @@ function GpuCard() {
           onChange={(b) => setGpu({ use_hash_join: b })}
           disabled={gpuOff}
           reason={gpuOff ? "Enable GPU mode to use hash-join" : undefined}
-          label="GPU hash-join (Options 1–2)"
-          description="Accelerates exact matching with on-GPU hashing."
+          label={isDeep ? "GPU hash-join for exact helpers" : "GPU hash-join (Options 1–2)"}
+          description={
+            isDeep
+              ? "Available for exact matching helpers when the engine can use GPU pre-work."
+              : "Accelerates exact matching with on-GPU hashing."
+          }
         />
         <Toggle
           checked={gpu.use_direct_prefilter}
@@ -274,8 +302,12 @@ function GpuCard() {
           onChange={(b) => setGpu({ use_levenshtein_full_scoring: b })}
           disabled={gpuOff}
           reason={gpuOff ? "Enable GPU mode to use full GPU scoring" : undefined}
-          label="GPU Levenshtein scoring (Option 7)"
-          description="Runs the entire weighted Levenshtein pass on the GPU."
+          label={isDeep ? "GPU fuzzy scoring for L10/L11" : "GPU Levenshtein scoring (Option 7)"}
+          description={
+            isDeep
+              ? "Uses GPU scoring for fuzzy cascade levels where CUDA is available."
+              : "Runs the entire weighted Levenshtein pass on the GPU."
+          }
         />
         <Toggle
           checked={gpu.dynamic_tuning}
@@ -551,8 +583,11 @@ function PerformanceCard() {
 }
 
 function SummaryCard({ onAdvance }: { onAdvance: () => void }) {
+  const mode = useConfigStore((s) => s.mode);
   const algorithm = useConfigStore((s) => s.algorithm);
   const meta = algorithmMeta(algorithm);
+  const options = useConfigStore((s) => s.options);
+  const cascade = useConfigStore((s) => s.cascade);
   const gpu = useConfigStore((s) => s.gpu);
   const stream = useConfigStore((s) => s.streaming);
   const ex = useConfigStore((s) => s.export);
@@ -584,7 +619,28 @@ function SummaryCard({ onAdvance }: { onAdvance: () => void }) {
       </button>
       {open && (
         <dl className="text-sm space-y-2">
-          <Row label="Algorithm" value={`Option ${meta.optionNumber} · ${meta.label}`} />
+          <Row
+            label="Mode"
+            value={
+              mode === "deep"
+                ? `Deep Match - ${cascade.levels.length} level${cascade.levels.length === 1 ? "" : "s"}`
+                : `Option ${meta.optionNumber} · ${meta.label}`
+            }
+          />
+          {mode === "deep" && (
+            <Row
+              label="Exclusion"
+              value={
+                cascade.exclusion_mode === "exclusive"
+                  ? "Exclusive - faster, first matched level wins"
+                  : "Independent - slower, every level checks all rows"
+              }
+            />
+          )}
+          <Row
+            label="Birthdate swap"
+            value={options.allow_birthdate_swap ? "On" : "Off"}
+          />
           <Row
             label="Source"
             value={

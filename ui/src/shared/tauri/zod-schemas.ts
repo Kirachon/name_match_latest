@@ -51,6 +51,7 @@ const ExportOptionsSchema = z.object({
     .min(1, "File stem is required")
     .regex(/^[A-Za-z0-9._-]+$/, "Use letters, digits, dot, underscore, or hyphen"),
   min_confidence: z.number().min(0).max(100).nullable().optional(),
+  include_extra_fields: z.boolean(),
 });
 
 const MatchOptionsSchema = z.object({

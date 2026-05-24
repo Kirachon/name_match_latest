@@ -21,7 +21,7 @@ use crate::matching::MatchPair;
 use crate::matching::birthdate_matcher::birthdate_matches;
 use crate::models::{NormalizedPerson, Person};
 use cudarc::driver::{
-    CudaContext, CudaFunction, CudaStream, LaunchConfig, PushKernelArg, PinnedHostSlice,
+    CudaContext, CudaFunction, CudaStream, LaunchConfig, PinnedHostSlice, PushKernelArg,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -601,10 +601,7 @@ impl GpuBatchAccumulator {
 
             // Use CPU In-Memory classification logic for parity
             let cls = if super::gpu_no_mid_mode() {
-                super::classify_pair_cached_no_mid(
-                    &cache1[pair.outer_idx],
-                    &cache2[pair.inner_idx],
-                )
+                super::classify_pair_cached_no_mid(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
             } else {
                 // L10 PARITY FIX: Full middle name required (length >= 2 after trimming '.')
                 // This matches the CPU path in advanced_matcher.rs lines 278-292

@@ -98,7 +98,7 @@ pub(crate) fn build_match_headers(
 mod tests {
     use super::{build_match_headers, collect_extra_field_names};
     use crate::export::csv_export::export_to_csv;
-    use crate::export::xlsx_export::{export_to_xlsx, SummaryContext};
+    use crate::export::xlsx_export::{SummaryContext, export_to_xlsx};
     use crate::matching::{MatchPair, MatchingAlgorithm};
     use crate::models::Person;
     use chrono::{NaiveDate, Utc};
@@ -206,7 +206,10 @@ mod tests {
         let extra_fields = collect_extra_field_names(&matches);
         let expected =
             build_match_headers(MatchingAlgorithm::IdUuidYasIsMatchedInfnbd, &extra_fields);
-        assert_eq!(headers, expected, "csv headers should match shared header builder");
+        assert_eq!(
+            headers, expected,
+            "csv headers should match shared header builder"
+        );
 
         let csv_meta = std::fs::metadata(csv_path).expect("csv metadata");
         assert!(csv_meta.len() > 0);

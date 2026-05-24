@@ -3055,6 +3055,7 @@ impl GuiApp {
                             // GPU acceleration for cascade: uses hash join for L1-L9 and fuzzy metrics for L10-L11
                             compute_backend: cascade_compute_backend,
                             gpu_device_id: None,
+                            gpu_mem_budget_mb: None,
                         };
 
                         // Run cascade with progress reporting

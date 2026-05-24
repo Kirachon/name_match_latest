@@ -20,12 +20,16 @@
     Sandboxed CARGO_HOME to use (defaults to C:\cargo_nm_temp to avoid the
     locked in-tree .cargo-home cache).
 
+.PARAMETER NoBundle
+    Build only the release EXE and skip MSI/NSIS packaging.
+
 .EXAMPLE
     powershell -File scripts\windows\Build-Tauri-Cpu.ps1
 #>
 param(
   [switch]$Clean,
   [switch]$UseGlobalCargoHome,
+  [switch]$NoBundle,
   [string]$CargoHome = "C:\cargo_nm_temp"
 )
 
@@ -68,13 +72,18 @@ if (-not (Get-Command "cargo-tauri" -ErrorAction SilentlyContinue)) {
   cargo install tauri-cli --version "^2" --locked
 }
 
-# 4) Build the Tauri shell (CPU). --no-bundle skips MSI/NSIS packaging until
-#    real brand icons are generated via `cargo tauri icon`.
+# 4) Build the Tauri shell (CPU). Default path verifies the real MSI/NSIS
+#    bundle targets; -NoBundle keeps the faster developer smoke path.
 Write-Host "[tauri] cargo tauri build (CPU)"
 Push-Location "$repoRoot\src-tauri"
-cargo tauri build --no-bundle
+if ($NoBundle) {
+  cargo tauri build --no-bundle
+} else {
+  cargo tauri build
+}
 Pop-Location
 
 Write-Host ""
-Write-Host "Done. Artefact:"
+Write-Host "Done. Artefacts:"
 Write-Host "  $repoRoot\src-tauri\target\release\name-matcher-tauri.exe"
+Write-Host "  $repoRoot\src-tauri\target\release\bundle"

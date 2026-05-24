@@ -1,5 +1,5 @@
-use crate::export::{build_match_headers, collect_extra_field_names};
 use crate::export::xlsx_export::SummaryContext;
+use crate::export::{build_match_headers, collect_extra_field_names};
 use crate::matching::advanced_matcher::AdvLevel;
 use crate::matching::{MatchPair, MatchingAlgorithm};
 use anyhow::Result;

@@ -14,6 +14,7 @@
 param(
   [switch]$Clean,
   [switch]$UseGlobalCargoHome,
+  [switch]$NoBundle,
   [string]$CargoHome = "C:\cargo_nm_temp"
 )
 
@@ -51,11 +52,6 @@ if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
   cargo install tauri-cli --version "^2" --locked
 }
 
-Write-Host "[tauri] cargo tauri build (GPU)"
-Push-Location "$repoRoot\src-tauri"
-cargo tauri build --features gpu --no-bundle
-Pop-Location
-
 # GPU runtime DLLs - discover exact CUDA 12.x filenames from the prepared
 # runtime folder so minor CUDA Toolkit changes do not break packaging.
 $dist = "$repoRoot\src-tauri\target\release"
@@ -74,6 +70,22 @@ foreach ($pattern in $expected) {
   }
 }
 Write-Host "Copied GPU DLLs: $($copied -join ', ')"
+
+Write-Host "[tauri] cargo tauri build (GPU)"
+Push-Location "$repoRoot\src-tauri"
+if ($NoBundle) {
+  cargo tauri build --features gpu --no-bundle
+} else {
+  cargo tauri build --features gpu
+}
+Pop-Location
+
+# Ensure portable release-folder artifacts include the runtime DLLs even when
+# the bundler rebuilds the EXE after the first copy.
+foreach ($pattern in $expected) {
+  Get-ChildItem "$repoRoot\dist\gpu-dlls" -Filter $pattern -File -ErrorAction SilentlyContinue |
+    ForEach-Object { Copy-Item $_.FullName $dist -Force }
+}
 
 Write-Host ""
 Write-Host "Done. Verify:"

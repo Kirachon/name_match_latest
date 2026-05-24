@@ -1140,8 +1140,7 @@ pub mod db_pipeline {
                             .to_ascii_uppercase()
                             .to_string()
                     } else {
-                        crate::matching::key_for_engine(key_algo, &n)
-                            .unwrap_or_default()
+                        crate::matching::key_for_engine(key_algo, &n).unwrap_or_default()
                     }
                 },
                 std::marker::PhantomData,

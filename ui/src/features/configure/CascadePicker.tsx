@@ -193,8 +193,8 @@ export function CascadePicker() {
           label="Exclusion mode"
           help={
             cascade.exclusion_mode === "exclusive"
-              ? "Each pair appears in at most one level (recommended)."
-              : "Every level runs against the full dataset; pairs may appear at multiple levels."
+              ? "Recommended. Once a pair is matched in an earlier level, it is skipped in later levels."
+              : "Every level checks the full dataset. This is slower and the same pair may appear more than once."
           }
         >
           <div className="grid grid-cols-2 gap-1.5">
@@ -214,6 +214,12 @@ export function CascadePicker() {
               </button>
             ))}
           </div>
+          {cascade.exclusion_mode === "independent" && (
+            <div className="mt-2 rounded-md border border-warn-500/40 bg-warn-500/10 px-3 py-2 text-xs text-warn-200">
+              Independent mode can take much longer on large tables because
+              every selected level checks the full dataset again.
+            </div>
+          )}
         </Field>
       </div>
 

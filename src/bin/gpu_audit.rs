@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use log::LevelFilter;
-use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
+use sqlx::{MySqlPool, mysql::MySqlPoolOptions};
 use std::cmp::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -255,7 +255,8 @@ async fn run_cpu_equivalent_variant(
     matching::set_gpu_fuzzy_disable(false);
 
     let start = Instant::now();
-    let pairs = name_matcher::matching::match_fuzzy_cpu_gpu_equivalent(t1, t2, &progress_printer(label));
+    let pairs =
+        name_matcher::matching::match_fuzzy_cpu_gpu_equivalent(t1, t2, &progress_printer(label));
     let elapsed = start.elapsed();
 
     RunResult {
@@ -290,7 +291,13 @@ async fn run_gpu_prefilter_variant(
     };
 
     let start = Instant::now();
-    let pairs = match_all_with_opts(t1, t2, MatchingAlgorithm::Fuzzy, opts, progress_printer(label));
+    let pairs = match_all_with_opts(
+        t1,
+        t2,
+        MatchingAlgorithm::Fuzzy,
+        opts,
+        progress_printer(label),
+    );
     let elapsed = start.elapsed();
 
     RunResult {
@@ -351,10 +358,7 @@ fn print_shortlist_summary(shortlists: &[Vec<usize>], t1_len: usize, t2_len: usi
     };
     println!(
         "[gpu_audit] GPU shortlist: {} candidate pairs across {} x {} input rows ({:.4}% of brute force)",
-        candidate_count,
-        t1_len,
-        t2_len,
-        reduction
+        candidate_count, t1_len, t2_len, reduction
     );
 }
 
@@ -386,9 +390,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let scratch = if cfg.no_clone {
-        println!(
-            "[gpu_audit] Using source tables directly (NAME_MATCHER_GPU_AUDIT_NO_CLONE=1)"
-        );
+        println!("[gpu_audit] Using source tables directly (NAME_MATCHER_GPU_AUDIT_NO_CLONE=1)");
         ScratchTables {
             a: cfg.source_a.clone(),
             b: cfg.source_b.clone(),
@@ -410,8 +412,13 @@ async fn main() -> Result<()> {
         let baseline = run_cpu_equivalent_variant("baseline_cpu_equiv", &t1, &t2).await;
         print_run_summary(&baseline);
 
-        let experimental =
-            run_gpu_prefilter_variant("experimental_gpu_prefilter", &t1, &t2, cfg.gpu_mem_budget_mb).await;
+        let experimental = run_gpu_prefilter_variant(
+            "experimental_gpu_prefilter",
+            &t1,
+            &t2,
+            cfg.gpu_mem_budget_mb,
+        )
+        .await;
         print_run_summary(&experimental);
 
         compare_runs(&baseline, &experimental)?;

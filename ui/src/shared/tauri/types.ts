@@ -91,6 +91,7 @@ export interface ExportOptionsDto {
   output_directory: string;
   file_stem: string;
   min_confidence?: number | null;
+  include_extra_fields: boolean;
 }
 
 export interface MatchOptionsDto {
@@ -260,14 +261,28 @@ export interface MatchPairDto {
   source_uuid?: string | null;
   source_full_name: string;
   source_birthdate?: string | null;
+  source_region_name?: string | null;
+  source_province_name?: string | null;
+  source_city_name?: string | null;
+  source_barangay_name?: string | null;
+  source_extra_fields?: Record<string, string>;
   target_id: number;
   target_uuid?: string | null;
   target_full_name: string;
   target_birthdate?: string | null;
+  target_region_name?: string | null;
+  target_province_name?: string | null;
+  target_city_name?: string | null;
+  target_barangay_name?: string | null;
+  target_extra_fields?: Record<string, string>;
   confidence: number;
   matched_fields: string[];
+  /** Plain-language reason for why the pair matched. */
+  remarks?: string | null;
   /** Cascade level (1..=11) that produced this pair, when applicable. */
   matched_at_level?: number | null;
+  /** Human-readable cascade method label, when applicable. */
+  match_method?: string | null;
 }
 
 export interface ResultPageRequestDto {
@@ -306,6 +321,7 @@ export interface ExportRequestDto {
   output_directory: string;
   file_stem: string;
   min_confidence?: number | null;
+  include_extra_fields?: boolean;
 }
 
 export interface ExportResultDto {
@@ -491,4 +507,5 @@ export const DEFAULT_EXPORT_OPTIONS: ExportOptionsDto = {
   output_directory: "",
   file_stem: "matches",
   min_confidence: null,
+  include_extra_fields: false,
 };

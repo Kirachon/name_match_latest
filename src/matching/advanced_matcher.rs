@@ -264,10 +264,14 @@ pub fn advanced_match_inmemory(
         AdvLevel::L10FuzzyBirthdateFullMiddle => {
             use std::collections::{HashMap, HashSet};
             let allow_swap = cfg.allow_birthdate_swap;
-            let cache1: Vec<super::CpuFuzzyCache> =
-                table1.par_iter().map(super::build_cpu_fuzzy_cache).collect();
-            let cache2: Vec<super::CpuFuzzyCache> =
-                table2.par_iter().map(super::build_cpu_fuzzy_cache).collect();
+            let cache1: Vec<super::CpuFuzzyCache> = table1
+                .par_iter()
+                .map(super::build_cpu_fuzzy_cache)
+                .collect();
+            let cache2: Vec<super::CpuFuzzyCache> = table2
+                .par_iter()
+                .map(super::build_cpu_fuzzy_cache)
+                .collect();
 
             // Index table2 by birthdate (with optional swapped keys)
             let mut by_bd2: HashMap<String, Vec<usize>> = HashMap::new();
@@ -324,8 +328,10 @@ pub fn advanced_match_inmemory(
                                         is_matched_infnbd: false,
                                         is_matched_infnmnbd: false,
                                     };
-                                    let m1 = pair.person1.middle_name.as_deref().unwrap_or("").trim();
-                                    let m2 = pair.person2.middle_name.as_deref().unwrap_or("").trim();
+                                    let m1 =
+                                        pair.person1.middle_name.as_deref().unwrap_or("").trim();
+                                    let m2 =
+                                        pair.person2.middle_name.as_deref().unwrap_or("").trim();
                                     let l1 = m1
                                         .trim_matches('.')
                                         .chars()
@@ -360,10 +366,14 @@ pub fn advanced_match_inmemory(
         AdvLevel::L11FuzzyBirthdateNoMiddle => {
             use std::collections::{HashMap, HashSet};
             let allow_swap = false;
-            let cache1: Vec<super::CpuFuzzyCache> =
-                table1.par_iter().map(super::build_cpu_fuzzy_cache).collect();
-            let cache2: Vec<super::CpuFuzzyCache> =
-                table2.par_iter().map(super::build_cpu_fuzzy_cache).collect();
+            let cache1: Vec<super::CpuFuzzyCache> = table1
+                .par_iter()
+                .map(super::build_cpu_fuzzy_cache)
+                .collect();
+            let cache2: Vec<super::CpuFuzzyCache> = table2
+                .par_iter()
+                .map(super::build_cpu_fuzzy_cache)
+                .collect();
 
             let mut by_bd2: HashMap<String, Vec<usize>> = HashMap::new();
             for (idx, p) in table2.iter().enumerate() {
@@ -466,12 +476,7 @@ pub fn advanced_match_inmemory(
                             cands
                                 .iter()
                                 .map(|&idx2| {
-                                    make_pair(
-                                        &table1[*idx1],
-                                        &table2[idx2],
-                                        1.0,
-                                        fields.clone(),
-                                    )
+                                    make_pair(&table1[*idx1], &table2[idx2], 1.0, fields.clone())
                                 })
                                 .collect::<Vec<MatchPair>>()
                         })

@@ -199,7 +199,9 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
         );
         eprintln!("  NAME_MATCHER_GPU_PINNED_HOST=1   enable via environment (best-effort)");
         eprintln!("  NAME_MATCHER_GPU_BATCH_LOG=0     disable per-batch GPU logging (default on)");
-        eprintln!("  NAME_MATCHER_GPU_FUZZY_READBACK=1 enable GPU fuzzy score readback (default off)");
+        eprintln!(
+            "  NAME_MATCHER_GPU_FUZZY_READBACK=1 enable GPU fuzzy score readback (default off)"
+        );
         eprintln!(
             "  --gpu-fuzzy-metrics              Use GPU kernels for Levenshtein/Jaro/Jaro-Winkler scoring (Algo 3/4)"
         );
@@ -670,6 +672,7 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
             // Currently defaults to CPU; GPU support to be added in Phase 2
             compute_backend: crate::matching::ComputeBackend::Cpu,
             gpu_device_id: None,
+            gpu_mem_budget_mb: None,
         };
 
         // Run cascade

@@ -130,6 +130,7 @@ export function ResultsTab() {
         output_directory: dir,
         file_stem: exportCfg.file_stem || "matches",
         min_confidence: minConf > 0 ? minConf : null,
+        include_extra_fields: exportCfg.include_extra_fields,
       });
       pushToast({
         tone: "success",
@@ -250,6 +251,26 @@ export function ResultsTab() {
               <option value="asc">Ascending</option>
             </select>
           </Field>
+          <label className="flex items-start gap-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2 lg:col-span-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 accent-primary-400"
+              checked={exportCfg.include_extra_fields}
+              onChange={(e) =>
+                useConfigStore
+                  .getState()
+                  .setExport({ include_extra_fields: e.target.checked })
+              }
+            />
+            <span className="min-w-0">
+              <span className="block text-sm text-ink-100">
+                Include all extra fields on export
+              </span>
+              <span className="block text-xs text-ink-400">
+                Adds every non-standard source and target table column to CSV/XLSX.
+              </span>
+            </span>
+          </label>
         </div>
       </Card>
 
@@ -287,7 +308,7 @@ export function ResultsTab() {
   );
 }
 
-const COL_TEMPLATE = "70px 90px 1fr 110px 90px 1fr 110px 90px 90px";
+const COL_TEMPLATE = "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px";
 
 function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -317,6 +338,7 @@ function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
         <div role="columnheader" className="text-right">
           Confidence
         </div>
+        <div role="columnheader">Level / method</div>
         <div role="columnheader">Fields</div>
       </div>
       <div
@@ -366,6 +388,17 @@ function ResultsTable({ rows }: { rows: MatchPairDto[] }) {
               </div>
               <div role="cell" className="text-right tabular">
                 <ConfidencePill value={r.confidence} />
+              </div>
+              <div
+                role="cell"
+                className="text-2xs text-ink-300 truncate"
+                title={r.match_method ?? undefined}
+              >
+                {r.matched_at_level
+                  ? `L${String(r.matched_at_level).padStart(2, "0")}${
+                      r.match_method ? ` · ${r.match_method.replace(/^L\d+\s*-\s*/, "")}` : ""
+                    }`
+                  : "—"}
               </div>
               <div role="cell" className="text-2xs text-ink-400 truncate" title={r.matched_fields.join(", ")}>
                 {r.matched_fields.join(", ")}

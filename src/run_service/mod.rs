@@ -110,7 +110,7 @@ fn cuda_driver_version_string() -> Option<String> {
 
 use crate::matching::{ComputeBackend, MatchOptions, ProgressConfig, ProgressUpdate};
 use anyhow::Context;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -553,6 +553,7 @@ fn run_worker(
             exclusion_mode: exclusion,
             compute_backend: backend,
             gpu_device_id: None,
+            gpu_mem_budget_mb: config.gpu.vram_budget_mb.map(|mb| mb as u64),
         };
 
         // Throttled progress callback for cascade level transitions.
@@ -565,6 +566,78 @@ fn run_worker(
             11usize
         } else {
             casc.levels.len()
+        };
+        let cascade_engine_job_id = job_id.clone();
+        let cascade_engine_sink = Arc::clone(&sink);
+        let cascade_engine_cancel = cancel.clone();
+        let cascade_engine_pause = pause.clone();
+        let cascade_engine_state = Arc::clone(&state);
+        let cascade_engine_last_emit = Arc::new(Mutex::new(Instant::now()));
+        let cascade_engine_progress = move |u: ProgressUpdate| {
+            if cascade_engine_cancel.is_cancelled() {
+                panic!("__name_match_cancelled__");
+            }
+            if cascade_engine_pause.is_paused() {
+                {
+                    let mut g = cascade_engine_state.lock().expect("state mutex poisoned");
+                    if matches!(*g, JobStateDto::Pausing | JobStateDto::Running) {
+                        *g = JobStateDto::Paused;
+                        drop(g);
+                        cascade_engine_sink.emit_state(JobStateEventDto {
+                            job_id: cascade_engine_job_id.clone(),
+                            state: JobStateDto::Paused,
+                            detail: Some(format!(
+                                "Paused during {} at {} / {} ({:.1}%)",
+                                u.stage, u.processed, u.total, u.percent
+                            )),
+                        });
+                    }
+                }
+                while cascade_engine_pause.is_paused() && !cascade_engine_cancel.is_cancelled() {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                if cascade_engine_cancel.is_cancelled() {
+                    panic!("__name_match_cancelled__");
+                }
+                {
+                    let mut g = cascade_engine_state.lock().expect("state mutex poisoned");
+                    if matches!(*g, JobStateDto::Resuming | JobStateDto::Paused) {
+                        *g = JobStateDto::Running;
+                        drop(g);
+                        cascade_engine_sink.emit_state(JobStateEventDto {
+                            job_id: cascade_engine_job_id.clone(),
+                            state: JobStateDto::Running,
+                            detail: None,
+                        });
+                    }
+                }
+            }
+            if let Ok(mut last) = cascade_engine_last_emit.lock() {
+                if last.elapsed() < Duration::from_millis(50) && u.processed != u.total {
+                    return;
+                }
+                *last = Instant::now();
+            }
+            cascade_engine_sink.emit_progress(ProgressEventDto {
+                job_id: cascade_engine_job_id.clone(),
+                state: JobStateDto::Running,
+                stage: if u.stage.contains("gpu") {
+                    PipelineStageDto::Fuzzy
+                } else {
+                    PipelineStageDto::Match
+                },
+                processed: u.processed as u64,
+                total: u.total as u64,
+                percent: u.percent.clamp(0.0, 100.0),
+                eta_secs: u.eta_secs,
+                mem_used_mb: u.mem_used_mb,
+                mem_avail_mb: u.mem_avail_mb,
+                gpu_total_mb: u.gpu_total_mb,
+                gpu_free_mb: u.gpu_free_mb,
+                gpu_active: u.gpu_active,
+                records_per_sec: 0.0,
+                matches_found: total_matches_progress.load(Ordering::Relaxed),
+            });
         };
         let cascade_progress = move |p: crate::matching::cascade::CascadeProgress| {
             if cascade_cancel.is_cancelled() {
@@ -635,12 +708,13 @@ fn run_worker(
         };
 
         let cascade_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::matching::cascade::run_cascade_inmemory(
+            crate::matching::cascade::run_cascade_inmemory_with_engine_progress(
                 &t1,
                 &t2,
                 &cascade_cfg,
                 &geo_status,
                 cascade_progress,
+                cascade_engine_progress,
             )
         }));
 
@@ -805,15 +879,47 @@ fn run_worker(
             source_uuid: p.person1.uuid.clone(),
             source_full_name: full_name(&p.person1),
             source_birthdate: p.person1.birthdate.map(|d| d.to_string()),
+            source_region_name: location_field(&p.person1, &["region_name", "region"]),
+            source_province_name: location_field(&p.person1, &["province_name", "province"]),
+            source_city_name: location_field(
+                &p.person1,
+                &["city_name", "city", "municipality_name", "municipality"],
+            ),
+            source_barangay_name: location_field(
+                &p.person1,
+                &["barangay_name", "barangay", "brgy_name", "brgy"],
+            ),
+            source_extra_fields: extra_fields_map(&p.person1),
             target_id: p.person2.id,
             target_uuid: p.person2.uuid.clone(),
             target_full_name: full_name(&p.person2),
             target_birthdate: p.person2.birthdate.map(|d| d.to_string()),
+            target_region_name: location_field(&p.person2, &["region_name", "region"]),
+            target_province_name: location_field(&p.person2, &["province_name", "province"]),
+            target_city_name: location_field(
+                &p.person2,
+                &["city_name", "city", "municipality_name", "municipality"],
+            ),
+            target_barangay_name: location_field(
+                &p.person2,
+                &["barangay_name", "barangay", "brgy_name", "brgy"],
+            ),
+            target_extra_fields: extra_fields_map(&p.person2),
             confidence: p.confidence,
             matched_fields: p.matched_fields.clone(),
+            remarks: Some(match_remarks(
+                p,
+                worker_cascade_levels
+                    .as_ref()
+                    .and_then(|v| v.get(idx).copied()),
+            )),
             matched_at_level: worker_cascade_levels
                 .as_ref()
                 .and_then(|v| v.get(idx).copied()),
+            match_method: worker_cascade_levels
+                .as_ref()
+                .and_then(|v| v.get(idx).copied())
+                .map(|level| crate::matching::cascade::level_description(level).replace(':', " -")),
         })
         .collect();
     let count = dtos.len() as u64;
@@ -866,6 +972,52 @@ fn full_name(p: &crate::models::Person) -> String {
         .copied()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn location_field(p: &crate::models::Person, aliases: &[&str]) -> Option<String> {
+    aliases.iter().find_map(|alias| {
+        p.extra_fields
+            .get(*alias)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn extra_fields_map(p: &crate::models::Person) -> BTreeMap<String, String> {
+    p.extra_fields
+        .iter()
+        .filter_map(|(key, value)| {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some((key.clone(), value.to_string()))
+            }
+        })
+        .collect()
+}
+
+fn match_remarks(p: &crate::matching::MatchPair, level: Option<u8>) -> String {
+    let fields = if p.matched_fields.is_empty() {
+        "the available comparison fields".to_string()
+    } else {
+        p.matched_fields.join(", ")
+    };
+    if let Some(level) = level {
+        let method = crate::matching::cascade::level_description(level).replace(':', " -");
+        format!(
+            "{method}; similar because {fields} matched or scored close enough ({:.2}% confidence).",
+            p.confidence
+        )
+    } else if p.confidence >= 100.0 {
+        format!("Direct match because {fields} matched exactly.")
+    } else {
+        format!(
+            "Similarity match because {fields} matched or scored close enough ({:.2}% confidence).",
+            p.confidence
+        )
+    }
 }
 
 /// Inline copy of `orchestrator::apply_auto_optimize` so the lib does not need
