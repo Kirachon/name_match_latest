@@ -23,7 +23,7 @@ export function ReviewToolbar({
         <Pill tone="ok">{formatNumber(accepted)} accepted</Pill>
         <Pill tone="danger">{formatNumber(rejected)} rejected</Pill>
         <Pill tone={pending > 0 ? "warn" : "mute"}>
-          {formatNumber(pending)} pending
+          {formatNumber(pending)} pending in band
         </Pill>
         <span className="text-xs text-ink-400">
           {formatNumber(total)} rows on this page

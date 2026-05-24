@@ -250,7 +250,9 @@ export function ResultsTab() {
       const decision = decisions[decisionKey(row)]?.decision;
       if (decision === "accepted") acc.accepted += 1;
       else if (decision === "rejected") acc.rejected += 1;
-      else acc.pending += 1;
+      else if (inReviewBand(row.confidence, exportCfg.review_band)) {
+        acc.pending += 1;
+      }
       return acc;
     },
     { accepted: 0, rejected: 0, pending: 0 },
@@ -306,7 +308,11 @@ export function ResultsTab() {
     const orderedRows = [...pageRows.slice(startIndex), ...pageRows.slice(0, startIndex)];
     const next = orderedRows.find((row) => {
       const decision = decisions[decisionKey(row)]?.decision;
-      return decision !== "accepted" && decision !== "rejected";
+      return (
+        decision !== "accepted" &&
+        decision !== "rejected" &&
+        inReviewBand(row.confidence, exportCfg.review_band)
+      );
     });
     if (next) setSelectedRow(next);
   }
@@ -623,4 +629,13 @@ function isTypingTarget(target: EventTarget | null) {
     tag === "textarea" ||
     tag === "select"
   );
+}
+
+function inReviewBand(
+  confidence: number,
+  band: { min_confidence: number; max_confidence: number } | null | undefined,
+) {
+  const min = band?.min_confidence ?? 70;
+  const max = band?.max_confidence ?? 85;
+  return confidence >= min && confidence <= max;
 }

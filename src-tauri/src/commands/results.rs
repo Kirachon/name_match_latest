@@ -5,7 +5,7 @@ use name_matcher::run_service::dto::{
     ResultPageDto, ResultPageRequestDto, ReviewDecisionDto, SaveDecisionRequestDto,
     ScoreBreakdownDto,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use tauri::State;
 
@@ -125,17 +125,15 @@ pub fn export_results(
     let min = request.min_confidence.unwrap_or(0.0);
     validate_levels(&request.levels)?;
     let selected_levels: BTreeSet<u8> = request.levels.iter().copied().collect();
-    let rows: Vec<&name_matcher::run_service::dto::MatchPairDto> = snap
-        .rows
-        .iter()
-        .filter(|r| r.confidence >= min)
-        .filter(|r| {
-            selected_levels.is_empty()
-                || r.matched_at_level
-                    .map(|level| selected_levels.contains(&level))
-                    .unwrap_or(false)
-        })
-        .collect();
+    let rejected_pairs = state
+        .results
+        .get_decisions(&request.job_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|decision| decision.decision == "rejected")
+        .map(|decision| (decision.source_id, decision.target_id))
+        .collect::<HashSet<_>>();
+    let rows = filter_export_rows(&snap.rows, min, &selected_levels, &rejected_pairs);
     let row_count = rows.len() as u64;
     let is_cascade = rows.iter().any(|r| r.matched_at_level.is_some());
 
@@ -185,6 +183,24 @@ fn group_rows_by_level<'a>(
         }
     }
     grouped
+}
+
+fn filter_export_rows<'a>(
+    rows: &'a [name_matcher::run_service::dto::MatchPairDto],
+    min_confidence: f32,
+    selected_levels: &BTreeSet<u8>,
+    rejected_pairs: &HashSet<(i64, i64)>,
+) -> Vec<&'a name_matcher::run_service::dto::MatchPairDto> {
+    rows.iter()
+        .filter(|r| r.confidence >= min_confidence)
+        .filter(|r| !rejected_pairs.contains(&(r.source_id, r.target_id)))
+        .filter(|r| {
+            selected_levels.is_empty()
+                || r.matched_at_level
+                    .map(|level| selected_levels.contains(&level))
+                    .unwrap_or(false)
+        })
+        .collect()
 }
 
 fn validate_file_stem(stem: &str) -> AppResult<()> {
@@ -555,5 +571,17 @@ mod tests {
         assert!(data.contains("Source note"));
         assert!(data.contains("Target note"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn export_filter_excludes_rejected_pairs() {
+        let rows = [row(1, None), row(2, None)];
+        let rejected = [(2_i64, 102_i64)].into_iter().collect();
+        let selected_levels = BTreeSet::new();
+
+        let filtered = filter_export_rows(&rows, 0.0, &selected_levels, &rejected);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].row_id, 1);
     }
 }

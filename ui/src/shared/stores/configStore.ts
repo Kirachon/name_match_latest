@@ -101,6 +101,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       gpu: s.gpu,
       streaming: s.streaming,
       export: s.export,
+      review_band: s.export.review_band ?? null,
       cascade,
     };
   },

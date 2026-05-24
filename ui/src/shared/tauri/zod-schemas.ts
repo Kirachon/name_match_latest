@@ -102,6 +102,17 @@ const ExportOptionsSchema = z.object({
       "Use letters, digits, dot, underscore, or hyphen",
     ),
   min_confidence: z.number().min(0).max(100).nullable().optional(),
+  review_band: z
+    .object({
+      min_confidence: z.number().min(0).max(100),
+      max_confidence: z.number().min(0).max(100),
+    })
+    .refine((band) => band.min_confidence <= band.max_confidence, {
+      message: "Review band minimum must be <= maximum",
+      path: ["min_confidence"],
+    })
+    .nullable()
+    .optional(),
   include_extra_fields: z.boolean(),
 });
 
@@ -158,6 +169,7 @@ export const RunConfigSchema = z
     gpu: GpuOptionsSchema,
     streaming: StreamingOptionsSchema,
     export: ExportOptionsSchema,
+    review_band: ExportOptionsSchema.shape.review_band,
     cascade: CascadeSchema,
   })
   .superRefine((cfg, ctx) => {

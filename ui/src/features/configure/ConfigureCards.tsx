@@ -511,6 +511,62 @@ export function ExportCard() {
             </div>
           </Field>
         )}
+        <Field
+          label="Review band"
+          help="Rows in this confidence range are highlighted for manual accept/reject review."
+          className="md:col-span-2"
+        >
+          <div className="grid sm:grid-cols-2 gap-3">
+            <label className="space-y-1">
+              <span className="text-xs text-ink-400">Minimum</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={ex.review_band?.min_confidence ?? 70}
+                onChange={(e) => {
+                  const min = Number(e.target.value);
+                  const max = ex.review_band?.max_confidence ?? 85;
+                  set({
+                    review_band: {
+                      min_confidence: min,
+                      max_confidence: Math.max(min, max),
+                    },
+                  });
+                }}
+                className="w-full accent-accent-500"
+              />
+              <div className="text-xs text-ink-300 tabular">
+                {ex.review_band?.min_confidence ?? 70}%
+              </div>
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs text-ink-400">Maximum</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={ex.review_band?.max_confidence ?? 85}
+                onChange={(e) => {
+                  const max = Number(e.target.value);
+                  const min = ex.review_band?.min_confidence ?? 70;
+                  set({
+                    review_band: {
+                      min_confidence: Math.min(min, max),
+                      max_confidence: max,
+                    },
+                  });
+                }}
+                className="w-full accent-accent-500"
+              />
+              <div className="text-xs text-ink-300 tabular">
+                {ex.review_band?.max_confidence ?? 85}%
+              </div>
+            </label>
+          </div>
+        </Field>
       </div>
     </Card>
   );

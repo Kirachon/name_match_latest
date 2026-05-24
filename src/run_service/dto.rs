@@ -267,6 +267,8 @@ pub struct ExportOptionsDto {
     /// Minimum confidence (0..=100) required to include a row in the export.
     #[serde(default)]
     pub min_confidence: Option<f32>,
+    #[serde(default)]
+    pub review_band: Option<ReviewBandDto>,
 }
 
 impl Default for ExportOptionsDto {
@@ -276,6 +278,22 @@ impl Default for ExportOptionsDto {
             output_directory: ".".into(),
             file_stem: "matches".into(),
             min_confidence: None,
+            review_band: Some(ReviewBandDto::default()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ReviewBandDto {
+    pub min_confidence: f32,
+    pub max_confidence: f32,
+}
+
+impl Default for ReviewBandDto {
+    fn default() -> Self {
+        Self {
+            min_confidence: 70.0,
+            max_confidence: 85.0,
         }
     }
 }
@@ -363,6 +381,8 @@ pub struct RunConfigDto {
     #[serde(default)]
     pub streaming: StreamingOptionsDto,
     pub export: ExportOptionsDto,
+    #[serde(default)]
+    pub review_band: Option<ReviewBandDto>,
     /// When set with `enabled = true`, the job runs in cascade (Deep Match)
     /// mode and `algorithm` is ignored.
     #[serde(default)]

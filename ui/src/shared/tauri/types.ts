@@ -132,7 +132,13 @@ export interface ExportOptionsDto {
   output_directory: string;
   file_stem: string;
   min_confidence?: number | null;
+  review_band?: ReviewBandDto | null;
   include_extra_fields: boolean;
+}
+
+export interface ReviewBandDto {
+  min_confidence: number;
+  max_confidence: number;
 }
 
 export interface MatchOptionsDto {
@@ -152,6 +158,7 @@ export interface RunConfigDto {
   gpu: GpuOptionsDto;
   streaming: StreamingOptionsDto;
   export: ExportOptionsDto;
+  review_band?: ReviewBandDto | null;
   /** Set with `enabled: true` to run cascade (Deep Match). */
   cascade?: CascadeOptionsDto | null;
 }
@@ -683,5 +690,9 @@ export const DEFAULT_EXPORT_OPTIONS: ExportOptionsDto = {
   output_directory: "",
   file_stem: "matches",
   min_confidence: null,
+  review_band: {
+    min_confidence: 70,
+    max_confidence: 85,
+  },
   include_extra_fields: false,
 };
