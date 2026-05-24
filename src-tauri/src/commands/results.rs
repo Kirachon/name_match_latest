@@ -1,9 +1,9 @@
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use name_matcher::run_service::dto::{
-    AlgorithmDto, ExplainPairRequestDto, ExportFormatDto, ExportRequestDto, ExportResultDto,
-    ResultPageDto, ResultPageRequestDto, ReviewDecisionDto, SaveDecisionRequestDto,
-    ScoreBreakdownDto,
+    AlgorithmDto, DiffJobsRequestDto, DiffResultDto, ExplainPairRequestDto, ExportFormatDto,
+    ExportRequestDto, ExportResultDto, ResultPageDto, ResultPageRequestDto, ReviewDecisionDto,
+    SaveDecisionRequestDto, ScoreBreakdownDto,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -95,6 +95,17 @@ pub fn get_decisions(
     state
         .results
         .get_decisions(&job_id)
+        .map_err(|e| AppError::Validation(e.to_string()))
+}
+
+#[tauri::command]
+pub fn diff_jobs(
+    request: DiffJobsRequestDto,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<DiffResultDto> {
+    state
+        .results
+        .diff(&request)
         .map_err(|e| AppError::Validation(e.to_string()))
 }
 

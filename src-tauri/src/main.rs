@@ -74,6 +74,7 @@ fn main() {
             commands::explain_pair,
             commands::save_decision,
             commands::get_decisions,
+            commands::diff_jobs,
             commands::export_results,
         ])
         .run(tauri::generate_context!())

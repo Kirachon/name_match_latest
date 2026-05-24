@@ -6,6 +6,8 @@ import type {
   CsvPreviewRequestDto,
   DbCredentialsDto,
   DbSessionDto,
+  DiffJobsRequestDto,
+  DiffResultDto,
   ExportRequestDto,
   ExportResultDto,
   ExplainPairRequestDto,
@@ -105,5 +107,7 @@ export const saveDecision = (request: SaveDecisionRequestDto) =>
   call<ReviewDecisionDto>("save_decision", { request });
 export const getDecisions = (jobId: string) =>
   call<ReviewDecisionDto[]>("get_decisions", { jobId });
+export const diffJobs = (request: DiffJobsRequestDto) =>
+  call<DiffResultDto>("diff_jobs", { request });
 export const exportResults = (request: ExportRequestDto) =>
   call<ExportResultDto>("export_results", { request });

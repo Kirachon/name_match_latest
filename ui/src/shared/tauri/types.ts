@@ -473,6 +473,25 @@ export interface ReviewDecisionDto extends SaveDecisionRequestDto {
   updated_at_unix_ms: number;
 }
 
+export interface DiffJobsRequestDto {
+  base_job_id: string;
+  compare_job_id: string;
+}
+
+export interface DiffChangedRowDto {
+  before: MatchPairDto;
+  after: MatchPairDto;
+  confidence_delta: number;
+}
+
+export interface DiffResultDto {
+  base_job_id: string;
+  compare_job_id: string;
+  added: MatchPairDto[];
+  removed: MatchPairDto[];
+  changed: DiffChangedRowDto[];
+}
+
 export interface JobSummaryDto {
   job_id: string;
   state: JobStateDto;

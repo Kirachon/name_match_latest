@@ -612,6 +612,28 @@ pub struct ReviewDecisionDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffJobsRequestDto {
+    pub base_job_id: String,
+    pub compare_job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffChangedRowDto {
+    pub before: MatchPairDto,
+    pub after: MatchPairDto,
+    pub confidence_delta: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffResultDto {
+    pub base_job_id: String,
+    pub compare_job_id: String,
+    pub added: Vec<MatchPairDto>,
+    pub removed: Vec<MatchPairDto>,
+    pub changed: Vec<DiffChangedRowDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultPageRequestDto {
     pub job_id: String,
     /// Cursor-based page index. 0 = first page.

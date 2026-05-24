@@ -152,6 +152,16 @@ export const SaveDecisionSchema = z.object({
   note: z.string().nullable().optional(),
 });
 
+export const DiffJobsSchema = z
+  .object({
+    base_job_id: z.string().min(1),
+    compare_job_id: z.string().min(1),
+  })
+  .refine((value) => value.base_job_id !== value.compare_job_id, {
+    message: "Choose two different jobs",
+    path: ["compare_job_id"],
+  });
+
 export const RunConfigSchema = z
   .object({
     source: TableSelectionSchema,

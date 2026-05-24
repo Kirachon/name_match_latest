@@ -9,8 +9,9 @@
 //! paged, exported, explained, reviewed, and diffed by later features.
 
 use super::dto::{
-    AlgorithmDto, JobStateDto, JobSummaryDto, MatchPairDto, ResultPageDto, ResultPageRequestDto,
-    ReviewDecisionDto, SaveDecisionRequestDto,
+    AlgorithmDto, DiffChangedRowDto, DiffJobsRequestDto, DiffResultDto, JobStateDto,
+    JobSummaryDto, MatchPairDto, ResultPageDto, ResultPageRequestDto, ReviewDecisionDto,
+    SaveDecisionRequestDto,
 };
 use crate::models::Person;
 use anyhow::{Result, bail};
@@ -271,6 +272,19 @@ impl ResultStore {
         sqlite.get_decisions(job_id)
     }
 
+    pub fn diff(&self, request: &DiffJobsRequestDto) -> Result<DiffResultDto> {
+        if request.base_job_id == request.compare_job_id {
+            bail!("Choose two different jobs to compare");
+        }
+        let base = self
+            .snapshot(&request.base_job_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", request.base_job_id))?;
+        let compare = self
+            .snapshot(&request.compare_job_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", request.compare_job_id))?;
+        Ok(diff_jobs(&base.rows, &compare.rows, request))
+    }
+
     /// Implementation for the Tauri `get_results_page` command.
     pub fn page(&self, req: &ResultPageRequestDto) -> Result<ResultPageDto> {
         if req.limit == 0 || req.limit > 10_000 {
@@ -407,6 +421,60 @@ fn validate_decision(decision: &str) -> Result<()> {
         "accepted" | "rejected" | "pending" => Ok(()),
         other => bail!("Invalid review decision: {}", other),
     }
+}
+
+fn diff_jobs(
+    base_rows: &[MatchPairDto],
+    compare_rows: &[MatchPairDto],
+    request: &DiffJobsRequestDto,
+) -> DiffResultDto {
+    let base_by_key = base_rows
+        .iter()
+        .map(|row| (pair_key(row), row))
+        .collect::<HashMap<_, _>>();
+    let compare_by_key = compare_rows
+        .iter()
+        .map(|row| (pair_key(row), row))
+        .collect::<HashMap<_, _>>();
+
+    let mut added = compare_rows
+        .iter()
+        .filter(|row| !base_by_key.contains_key(&pair_key(row)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut removed = base_rows
+        .iter()
+        .filter(|row| !compare_by_key.contains_key(&pair_key(row)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut changed = compare_rows
+        .iter()
+        .filter_map(|after| {
+            let before = base_by_key.get(&pair_key(after))?;
+            let delta = after.confidence - before.confidence;
+            (delta.abs() >= 2.0).then(|| DiffChangedRowDto {
+                before: (*before).clone(),
+                after: after.clone(),
+                confidence_delta: delta,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    added.sort_by_key(pair_key);
+    removed.sort_by_key(pair_key);
+    changed.sort_by_key(|row| pair_key(&row.after));
+
+    DiffResultDto {
+        base_job_id: request.base_job_id.clone(),
+        compare_job_id: request.compare_job_id.clone(),
+        added,
+        removed,
+        changed,
+    }
+}
+
+fn pair_key(row: &MatchPairDto) -> (i64, i64) {
+    (row.source_id, row.target_id)
 }
 
 struct SqliteStore {
@@ -1317,5 +1385,53 @@ mod tests {
                 .to_string()
                 .contains("Invalid review decision")
         );
+    }
+
+    #[test]
+    fn diff_reports_added_removed_and_changed_pairs() {
+        let path = sqlite_path("diff");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        for job_id in ["base", "compare"] {
+            store.reserve(
+                job_id.into(),
+                AlgorithmDto::Fuzzy,
+                "source".into(),
+                "target".into(),
+                1,
+            );
+        }
+        store
+            .set_rows(
+                "base",
+                vec![
+                    mk_pair(1, 90.0, "same", "target"),
+                    mk_pair(2, 88.0, "changed", "target"),
+                    mk_pair(3, 92.0, "removed", "target"),
+                ],
+            )
+            .unwrap();
+        let mut same = mk_pair(1, 90.5, "same", "target");
+        same.target_id = 1001;
+        let mut changed = mk_pair(2, 94.0, "changed", "target");
+        changed.target_id = 1002;
+        let mut added = mk_pair(4, 91.0, "added", "target");
+        added.target_id = 1004;
+        store
+            .set_rows("compare", vec![same, changed, added])
+            .unwrap();
+        store.mark_finished("base", 3, 2);
+        store.mark_finished("compare", 3, 2);
+
+        let diff = store
+            .diff(&DiffJobsRequestDto {
+                base_job_id: "base".into(),
+                compare_job_id: "compare".into(),
+            })
+            .unwrap();
+
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.removed.len(), 1);
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].confidence_delta, 6.0);
     }
 }
