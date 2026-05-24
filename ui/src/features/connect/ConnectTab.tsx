@@ -55,7 +55,8 @@ export function ConnectTab({ onAdvance }: { onAdvance: () => void }) {
 }
 
 function ContinueButton({ onAdvance }: { onAdvance: () => void }) {
-  const { ready, reason } = useConnectionStore(readinessForRun);
+  const connState = useConnectionStore();
+  const { ready, reason } = readinessForRun(connState);
 
   return (
     <Button
