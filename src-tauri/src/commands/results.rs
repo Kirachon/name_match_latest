@@ -534,6 +534,7 @@ mod tests {
         StoredJob {
             summary: summary(),
             allow_birthdate_swap,
+            persist_result_history: true,
             rows: Vec::new(),
             source_people: vec![person(1, (1990, 4, 12))],
             target_people: vec![person(2, (1990, 12, 4))],

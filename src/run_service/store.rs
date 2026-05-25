@@ -35,6 +35,7 @@ impl Default for ResultStoreConfig {
 pub struct StoredJob {
     pub summary: JobSummaryDto,
     pub allow_birthdate_swap: bool,
+    pub persist_result_history: bool,
     pub rows: Vec<MatchPairDto>,
     pub source_people: Vec<Person>,
     pub target_people: Vec<Person>,
@@ -91,6 +92,7 @@ impl ResultStore {
             target_table,
             started_at_unix_ms,
             false,
+            true,
         );
     }
 
@@ -102,6 +104,7 @@ impl ResultStore {
         target_table: String,
         started_at_unix_ms: u64,
         allow_birthdate_swap: bool,
+        persist_result_history: bool,
     ) {
         let mut g = self.inner.lock();
         g.insert(
@@ -119,6 +122,7 @@ impl ResultStore {
                     finished_at_unix_ms: None,
                 },
                 allow_birthdate_swap,
+                persist_result_history,
                 rows: Vec::new(),
                 source_people: Vec::new(),
                 target_people: Vec::new(),
@@ -135,7 +139,9 @@ impl ResultStore {
                 slot.summary.matches_found = rows.len() as u64;
                 slot.rows = rows;
                 slot.last_accessed_unix_ms = now_ms();
-                if let Some(sqlite) = &self.sqlite {
+                if slot.persist_result_history
+                    && let Some(sqlite) = &self.sqlite
+                {
                     sqlite.save_job(slot)?;
                 }
                 Ok(())
@@ -156,7 +162,9 @@ impl ResultStore {
                 slot.source_people = source_people;
                 slot.target_people = target_people;
                 slot.last_accessed_unix_ms = now_ms();
-                if let Some(sqlite) = &self.sqlite {
+                if slot.persist_result_history
+                    && let Some(sqlite) = &self.sqlite
+                {
                     sqlite.save_job(slot)?;
                 }
                 Ok(())
@@ -174,7 +182,9 @@ impl ResultStore {
             slot.summary.elapsed_secs =
                 ((unix_ms.saturating_sub(slot.summary.started_at_unix_ms)) / 1000) as u64;
             slot.last_accessed_unix_ms = unix_ms;
-            if let Some(sqlite) = &self.sqlite {
+            if slot.persist_result_history
+                && let Some(sqlite) = &self.sqlite
+            {
                 if let Err(err) = sqlite.save_job(slot) {
                     log::error!("failed to persist finished job {job_id}: {err}");
                 }
@@ -194,7 +204,9 @@ impl ResultStore {
                 slot.summary.elapsed_secs =
                     ((unix_ms.saturating_sub(slot.summary.started_at_unix_ms)) / 1000) as u64;
             }
-            if let Some(sqlite) = &self.sqlite {
+            if slot.persist_result_history
+                && let Some(sqlite) = &self.sqlite
+            {
                 if let Err(err) = sqlite.save_job(slot) {
                     log::error!("failed to persist job state {job_id}: {err}");
                 }
@@ -676,6 +688,7 @@ impl SqliteStore {
         Ok(Some(StoredJob {
             summary,
             allow_birthdate_swap,
+            persist_result_history: true,
             rows,
             source_people: load_people("source")?,
             target_people: load_people("target")?,
@@ -1342,6 +1355,7 @@ mod tests {
             "target".into(),
             10,
             true,
+            true,
         );
         store
             .set_rows(
@@ -1415,6 +1429,37 @@ mod tests {
             snapshot.source_people[1].first_name.as_deref(),
             Some("Ana Maria")
         );
+    }
+
+    #[test]
+    fn sqlite_store_skips_disk_writes_when_history_persistence_is_off() {
+        let path = sqlite_path("history_off");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve_with_options(
+            "fast".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            10,
+            false,
+            false,
+        );
+        store
+            .set_person_snapshots(
+                "fast",
+                vec![mk_person(1, "Ana", "Santos")],
+                vec![mk_person(2, "Ana", "Santos")],
+            )
+            .unwrap();
+        store
+            .set_rows("fast", vec![mk_pair(0, 99.0, "Ana Santos", "Ana Santos")])
+            .unwrap();
+        store.mark_finished("fast", 1, 20);
+        assert!(store.summary("fast").is_some());
+        drop(store);
+
+        let reloaded = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        assert!(reloaded.summary("fast").is_none());
     }
 
     #[test]

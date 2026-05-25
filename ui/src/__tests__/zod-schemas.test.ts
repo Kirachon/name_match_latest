@@ -14,6 +14,7 @@ function validRunConfig(): RunConfigDto {
       rayon_threads: null,
       pool_size: null,
       memory_threshold_mb: null,
+      persist_result_history: false,
     },
     gpu: {
       mode: "auto",

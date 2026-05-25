@@ -601,6 +601,12 @@ export function PerformanceCard() {
           label="Ultra performance"
           description="Maxes out threads and pool. Disables manual overrides."
         />
+        <Toggle
+          checked={opts.persist_result_history}
+          onChange={(b) => set({ persist_result_history: b })}
+          label="Persist result history"
+          description="Stores person snapshots and results on disk for explanations, review decisions, restart recovery, and run diff. Leave off for faster matching start."
+        />
         <Field label="Rayon threads (manual override)">
           <input
             type="number"

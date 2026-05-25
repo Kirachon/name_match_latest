@@ -173,6 +173,7 @@ export interface MatchOptionsDto {
   rayon_threads?: number | null;
   pool_size?: number | null;
   memory_threshold_mb?: number | null;
+  persist_result_history: boolean;
 }
 
 export interface RunConfigDto {
@@ -727,6 +728,7 @@ export const DEFAULT_MATCH_OPTIONS: MatchOptionsDto = {
   rayon_threads: null,
   pool_size: null,
   memory_threshold_mb: null,
+  persist_result_history: false,
 };
 
 export const DEFAULT_EXPORT_OPTIONS: ExportOptionsDto = {

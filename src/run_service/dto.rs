@@ -321,6 +321,9 @@ pub struct MatchOptionsDto {
     /// Memory threshold in MB to trigger streaming (`None` = engine default).
     #[serde(default)]
     pub memory_threshold_mb: Option<u32>,
+    /// Persist job history, person snapshots, review decisions, and run diffs to SQLite.
+    #[serde(default)]
+    pub persist_result_history: bool,
 }
 
 impl Default for MatchOptionsDto {
@@ -332,6 +335,7 @@ impl Default for MatchOptionsDto {
             rayon_threads: None,
             pool_size: None,
             memory_threshold_mb: None,
+            persist_result_history: false,
         }
     }
 }

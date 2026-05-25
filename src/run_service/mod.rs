@@ -329,6 +329,7 @@ impl RunService {
             selection_label(&config.target),
             started_at_unix_ms,
             config.options.allow_birthdate_swap,
+            config.options.persist_result_history,
         );
 
         let handle_state = Arc::clone(&state);
@@ -519,18 +520,28 @@ fn run_worker(
             tgt_label
         ),
     });
-    if let Err(e) = store
-        .set_person_snapshots(&job_id, t1.clone(), t2.clone())
-        .context("person snapshot store write")
-    {
-        fail_state(
-            &state,
-            sink_ref,
-            Some(store.as_ref()),
-            &job_id,
-            format!("Result store failed: {e}"),
-        );
-        return;
+    if config.options.persist_result_history {
+        if let Err(e) = store
+            .set_person_snapshots(&job_id, t1.clone(), t2.clone())
+            .context("person snapshot store write")
+        {
+            fail_state(
+                &state,
+                sink_ref,
+                Some(store.as_ref()),
+                &job_id,
+                format!("Result store failed: {e}"),
+            );
+            return;
+        }
+    } else {
+        sink.emit_log(LogEntryDto {
+            job_id: job_id.clone(),
+            timestamp_ms: now_ms(),
+            level: LogLevelDto::Info,
+            message: "Result history persistence is off; skipping pre-match person snapshot write"
+                .into(),
+        });
     }
 
     // 2) Resolve job-local matching options. Runtime jobs use a scoped Rayon

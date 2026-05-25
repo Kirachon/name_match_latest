@@ -130,6 +130,7 @@ const MatchOptionsSchema = z.object({
     .max(262_144)
     .nullable()
     .optional(),
+  persist_result_history: z.boolean(),
 });
 
 const CascadeSchema = z
