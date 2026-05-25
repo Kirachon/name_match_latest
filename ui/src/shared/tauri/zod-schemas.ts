@@ -78,6 +78,7 @@ const GpuOptionsSchema = z.object({
   use_levenshtein_full_scoring: z.boolean(),
   vram_budget_mb: z.number().int().min(64).max(65536).nullable().optional(),
   dynamic_tuning: z.boolean(),
+  fuzzy_gate_mode: z.enum(["off", "shadow", "gate-only"]).default("off"),
 });
 
 const StreamingOptionsSchema = z.object({
@@ -206,6 +207,13 @@ export const RunConfigSchema = z
           code: z.ZodIssueCode.custom,
           message: "GPU full Levenshtein scoring requires GPU mode",
           path: ["gpu", "use_levenshtein_full_scoring"],
+        });
+      }
+      if (cfg.gpu.fuzzy_gate_mode !== "off") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "GPU fuzzy gate requires GPU mode",
+          path: ["gpu", "fuzzy_gate_mode"],
         });
       }
     }

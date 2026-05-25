@@ -16,6 +16,7 @@ import {
   algorithmMeta,
   type ComputeModeDto,
   type ExportFormatDto,
+  type GpuFuzzyGateModeDto,
   type RunModeDto,
 } from "@/shared/tauri/types";
 import { cx, formatNumber } from "@/shared/lib/format";
@@ -310,6 +311,38 @@ export function GpuCard() {
           label="Dynamic GPU tuning"
           description="Auto-adjusts batch sizes from VRAM telemetry."
         />
+      </div>
+      <div className="mt-3">
+        <Field
+          label="L10/L11 fuzzy gate"
+          help="Shadow verifies parity. Fast gate skips GPU-rejected fuzzy pairs before CPU final scoring."
+        >
+          <div className="grid md:grid-cols-3 gap-2">
+            {(["off", "shadow", "gate-only"] as GpuFuzzyGateModeDto[]).map(
+              (m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setGpu({ fuzzy_gate_mode: m })}
+                  disabled={gpuOff}
+                  className={cx(
+                    "rounded-lg border px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 surface-hover",
+                    gpu.fuzzy_gate_mode === m
+                      ? "border-accent-500/60 bg-accent-500/5"
+                      : "border-ink-800 bg-ink-900/40 text-ink-300",
+                  )}
+                >
+                  <div className="font-medium text-ink-50">
+                    {fuzzyGateLabel(m)}
+                  </div>
+                  <div className="text-2xs text-ink-400 mt-0.5">
+                    {fuzzyGateHint(m)}
+                  </div>
+                </button>
+              ),
+            )}
+          </div>
+        </Field>
       </div>
       <div className="mt-3">
         <Field
@@ -799,5 +832,27 @@ function modeHint(m: ComputeModeDto) {
       return "Use GPU when available, fall back to CPU on OOM.";
     case "force-gpu":
       return "Fail fast if CUDA is not detected.";
+  }
+}
+
+function fuzzyGateLabel(m: GpuFuzzyGateModeDto) {
+  switch (m) {
+    case "off":
+      return "Off";
+    case "shadow":
+      return "Shadow verify";
+    case "gate-only":
+      return "Fast gate";
+  }
+}
+
+function fuzzyGateHint(m: GpuFuzzyGateModeDto) {
+  switch (m) {
+    case "off":
+      return "CPU checks every fuzzy candidate.";
+    case "shadow":
+      return "GPU predicts skips; CPU still checks all.";
+    case "gate-only":
+      return "CPU checks only GPU-kept pairs.";
   }
 }

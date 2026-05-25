@@ -570,6 +570,27 @@ fn run_worker(
     if config.gpu.dynamic_tuning {
         crate::matching::set_dynamic_gpu_tuning(true);
     }
+    let fuzzy_gate_mode = match config.gpu.fuzzy_gate_mode {
+        GpuFuzzyGateModeDto::Off => crate::matching::GpuFuzzyGateMode::Off,
+        GpuFuzzyGateModeDto::Shadow => crate::matching::GpuFuzzyGateMode::Shadow,
+        GpuFuzzyGateModeDto::GateOnly => crate::matching::GpuFuzzyGateMode::GateOnly,
+    };
+    crate::matching::set_gpu_fuzzy_gate_mode(fuzzy_gate_mode);
+    if matches!(fuzzy_gate_mode, crate::matching::GpuFuzzyGateMode::Off) {
+        crate::matching::set_gpu_fuzzy_force(false);
+    } else {
+        crate::matching::set_gpu_fuzzy_metrics(true);
+        crate::matching::set_gpu_fuzzy_force(true);
+        sink.emit_log(LogEntryDto {
+            job_id: job_id.clone(),
+            timestamp_ms: now_ms(),
+            level: LogLevelDto::Info,
+            message: format!(
+                "GPU fuzzy gate mode for L10/L11 is {}",
+                fuzzy_gate_mode.as_str()
+            ),
+        });
+    }
     if let Some(mb) = config.gpu.vram_budget_mb {
         crate::matching::set_gpu_fuzzy_prepass_budget_mb(mb as u64);
     }

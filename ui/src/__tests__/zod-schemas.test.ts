@@ -23,6 +23,7 @@ function validRunConfig(): RunConfigDto {
       use_levenshtein_full_scoring: false,
       vram_budget_mb: null,
       dynamic_tuning: true,
+      fuzzy_gate_mode: "off",
     },
     streaming: {
       mode: "auto",
@@ -56,6 +57,7 @@ describe("RunConfigSchema", () => {
         use_hash_join: true,
         use_direct_prefilter: true,
         use_levenshtein_full_scoring: true,
+        fuzzy_gate_mode: "shadow",
       },
     });
 
@@ -66,6 +68,7 @@ describe("RunConfigSchema", () => {
           "gpu.use_hash_join: GPU hash-join requires GPU mode",
           "gpu.use_direct_prefilter: GPU prefilter requires GPU mode",
           "gpu.use_levenshtein_full_scoring: GPU full Levenshtein scoring requires GPU mode",
+          "gpu.fuzzy_gate_mode: GPU fuzzy gate requires GPU mode",
         ]),
       );
     }

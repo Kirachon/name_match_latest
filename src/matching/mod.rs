@@ -1944,6 +1944,125 @@ fn gpu_fuzzy_metrics_enabled() -> bool {
     GPU_FUZZY_METRICS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuFuzzyGateMode {
+    Off,
+    Shadow,
+    GateOnly,
+}
+
+impl GpuFuzzyGateMode {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Shadow => 1,
+            Self::GateOnly => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Shadow,
+            2 => Self::GateOnly,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::GateOnly => "gate-only",
+        }
+    }
+
+    fn from_env_value(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" => Some(Self::Off),
+            "shadow" | "shadow-verify" | "verify" | "1" => Some(Self::Shadow),
+            "gate-only" | "gate_only" | "fast" | "fast-gate" | "2" => Some(Self::GateOnly),
+            _ => None,
+        }
+    }
+}
+
+impl Default for GpuFuzzyGateMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+static GPU_FUZZY_GATE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[inline]
+pub fn set_gpu_fuzzy_gate_mode(mode: GpuFuzzyGateMode) {
+    GPU_FUZZY_GATE_MODE.store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub fn current_gpu_fuzzy_gate_mode() -> GpuFuzzyGateMode {
+    if let Ok(value) = std::env::var("NAME_MATCHER_GPU_FUZZY_GATE_MODE") {
+        if let Some(mode) = GpuFuzzyGateMode::from_env_value(&value) {
+            return mode;
+        }
+    }
+    if truthy_env("NAME_MATCHER_GPU_FUZZY_GATE_ONLY") {
+        return GpuFuzzyGateMode::GateOnly;
+    }
+    if truthy_env("NAME_MATCHER_GPU_FUZZY_GATE_SHADOW") {
+        return GpuFuzzyGateMode::Shadow;
+    }
+    GpuFuzzyGateMode::from_u8(GPU_FUZZY_GATE_MODE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn truthy_env(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GpuFuzzyStats {
+    pub input_rows_left: u64,
+    pub input_rows_right: u64,
+    pub candidate_pairs_seen: u64,
+    pub pre_gpu_skipped_middle: u64,
+    pub pre_gpu_skipped_empty_name: u64,
+    pub direct_shortcuts: u64,
+    pub pairs_uploaded: u64,
+    pub gpu_gate_keep: u64,
+    pub gpu_gate_reject: u64,
+    pub cpu_classified: u64,
+    pub matches_emitted: u64,
+    pub shadow_false_negative_count: u64,
+    pub fallback_to_cpu_count: u64,
+    pub gpu_kernel_launch_count: u64,
+    pub h2d_time_us: u128,
+    pub kernel_time_us: u128,
+    pub d2h_time_us: u128,
+    pub cpu_classification_time_us: u128,
+    pub total_wall_time_us: u128,
+}
+
+static LAST_GPU_FUZZY_STATS: std::sync::OnceLock<std::sync::Mutex<Option<GpuFuzzyStats>>> =
+    std::sync::OnceLock::new();
+
+fn record_last_gpu_fuzzy_stats(stats: &GpuFuzzyStats) {
+    let slot = LAST_GPU_FUZZY_STATS.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(stats.clone());
+    }
+}
+
+pub fn last_gpu_fuzzy_stats() -> Option<GpuFuzzyStats> {
+    let slot = LAST_GPU_FUZZY_STATS.get_or_init(|| std::sync::Mutex::new(None));
+    slot.lock().ok().and_then(|guard| guard.clone())
+}
+
 /// Optional overrides for heuristic activation
 static GPU_FUZZY_FORCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static GPU_FUZZY_DISABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3283,6 +3402,53 @@ mod gpu {
             out[i] = m;
         }
     }
+
+    extern "C" __global__ void fuzzy_gate_kernel(
+        const char* a_buf, const int* a_off, const int* a_len,
+        const char* b_buf, const int* b_off, const int* b_len,
+        const unsigned char* mp_eq,
+        unsigned char* keep_out,
+        int n)
+    {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= n) return;
+        const int off_a = a_off[i]; int la = a_len[i]; if (la > (int)64) la = 64;
+        const int off_b = b_off[i]; int lb = b_len[i]; if (lb > (int)64) lb = 64;
+        const char* A = a_buf + off_a;
+        const char* B = b_buf + off_b;
+
+        int prev[65]; int curr[65];
+        for (int j=0;j<=lb;++j) prev[j] = j;
+        for (int ia=1; ia<=la; ++ia) {
+            curr[0] = ia;
+            char ca = A[ia-1];
+            for (int jb=1; jb<=lb; ++jb) {
+                int cost = (ca == B[jb-1]) ? 0 : 1;
+                int del = prev[jb] + 1;
+                int ins = curr[jb-1] + 1;
+                int sub = prev[jb-1] + cost;
+                int v = del < ins ? del : ins;
+                curr[jb] = v < sub ? v : sub;
+            }
+            for (int jb=0; jb<=lb; ++jb) prev[jb] = curr[jb];
+        }
+        int dist = prev[lb];
+        int ml = la > lb ? la : lb;
+        float lev = ml > 0 ? (1.0f - ((float)dist / (float)ml)) * 100.0f : 100.0f;
+
+        float j = jaro_core(A, la, B, lb);
+        int l = 0; int maxp = 4;
+        for (int k=0; k<min_i(min_i(la, lb), maxp); ++k) { if (A[k] == B[k]) ++l; else break; }
+        float jw = (j + l * 0.1f * (1.0f - j)) * 100.0f;
+
+        unsigned char keep;
+        if (mp_eq[i]) {
+            keep = (lev >= 84.0f || jw >= 84.0f) ? 1u : 0u;
+        } else {
+            keep = (lev >= 84.0f && jw >= 84.0f) ? 1u : 0u;
+        }
+        keep_out[i] = keep;
+    }
     "#;
     // Per-person cache to avoid repeated normalization and metaphone encoding during GPU post-processing
     #[derive(Clone)]
@@ -3571,6 +3737,7 @@ mod gpu {
         pub(crate) func_jaro: std::sync::Arc<cudarc::driver::CudaFunction>,
         pub(crate) func_jw: std::sync::Arc<cudarc::driver::CudaFunction>,
         pub(crate) func_max3: std::sync::Arc<cudarc::driver::CudaFunction>,
+        pub(crate) func_gate: std::sync::Arc<cudarc::driver::CudaFunction>,
         // Two reusable streams: default + auxiliary for overlapping transfers/compute
         pub(crate) stream_default: std::sync::Arc<cudarc::driver::CudaStream>,
         pub(crate) stream_aux: std::sync::Arc<cudarc::driver::CudaStream>,
@@ -3598,6 +3765,9 @@ mod gpu {
             let func_max3 = module
                 .load_function("max3_kernel")
                 .map_err(|e| anyhow!("Get max3 func failed: {e}"))?;
+            let func_gate = module
+                .load_function("fuzzy_gate_kernel")
+                .map_err(|e| anyhow!("Get fuzzy gate func failed: {e}"))?;
 
             // Prepare reusable streams
 
@@ -3613,6 +3783,7 @@ mod gpu {
                 func_jaro: func_jaro.into(),
                 func_jw: func_jw.into(),
                 func_max3: func_max3.into(),
+                func_gate: func_gate.into(),
                 stream_default,
                 stream_aux,
             })
@@ -5176,10 +5347,13 @@ mod gpu {
     where
         F: Fn(ProgressUpdate) + Sync,
     {
+        let wall_start = std::time::Instant::now();
         let allow_swap = opts.allow_birthdate_swap;
+        let gate_mode = current_gpu_fuzzy_gate_mode();
         log::info!(
-            "[GPU_FUZZY] allow_birthdate_swap flag = {} (env NAME_MATCHER_ALLOW_BIRTHDATE_SWAP={:?})",
+            "[GPU_FUZZY] allow_birthdate_swap flag = {} gate_mode={} (env NAME_MATCHER_ALLOW_BIRTHDATE_SWAP={:?})",
             allow_swap,
+            gate_mode.as_str(),
             std::env::var("NAME_MATCHER_ALLOW_BIRTHDATE_SWAP").ok()
         );
 
@@ -5187,8 +5361,19 @@ mod gpu {
         let n1: Vec<NormalizedPerson> = t1.par_iter().map(normalize_person).collect();
         let n2: Vec<NormalizedPerson> = t2.par_iter().map(normalize_person).collect();
         if n1.is_empty() || n2.is_empty() {
+            record_last_gpu_fuzzy_stats(&GpuFuzzyStats {
+                input_rows_left: n1.len() as u64,
+                input_rows_right: n2.len() as u64,
+                total_wall_time_us: wall_start.elapsed().as_micros(),
+                ..GpuFuzzyStats::default()
+            });
             return Ok(vec![]);
         }
+        let mut stats = GpuFuzzyStats {
+            input_rows_left: n1.len() as u64,
+            input_rows_right: n2.len() as u64,
+            ..GpuFuzzyStats::default()
+        };
 
         // 2) Build the same blocking index used by the CPU-equivalent path so
         // the GPU scorer operates on the exact same candidate set.
@@ -5244,6 +5429,7 @@ mod gpu {
         let func_jaro = &*fctx.func_jaro;
         let func_jw = &*fctx.func_jw;
         let func_max3 = &*fctx.func_max3;
+        let func_gate = &*fctx.func_gate;
 
         // Report GPU init and memory info
         let (gpu_total_mb, gpu_free_mb_init) = cuda_mem_info_mb(&*ctx_arc);
@@ -5411,6 +5597,7 @@ mod gpu {
                         continue;
                     }
                     total_candidates += 1;
+                    stats.candidate_pairs_seen += 1;
                     if let (Some(d1), Some(d2)) = (p1.birthdate, n2[j_idx].birthdate) {
                         if d1 != d2 {
                             swap_candidates += 1;
@@ -5419,14 +5606,17 @@ mod gpu {
                     if !gpu_no_mid_mode()
                         && (full_middle_len(&t1[i]) < 2 || full_middle_len(&t2[j_idx]) < 2)
                     {
+                        stats.pre_gpu_skipped_middle += 1;
                         continue;
                     }
                     let s1 = fuzzy_cache_name(&cache1[i]);
                     let s2 = fuzzy_cache_name(&cache2[j_idx]);
                     if s1.trim().is_empty() || s2.trim().is_empty() {
+                        stats.pre_gpu_skipped_empty_name += 1;
                         continue;
                     }
                     if s1 == s2 {
+                        stats.direct_shortcuts += 1;
                         let bd_match = match (t1[i].birthdate, t2[j_idx].birthdate) {
                             (Some(b1), Some(b2)) => {
                                 let stored = b1.format("%Y-%m-%d").to_string();
@@ -5448,6 +5638,7 @@ mod gpu {
                                 is_matched_infnbd: false,
                                 is_matched_infnmnbd: false,
                             });
+                            stats.matches_emitted += 1;
                         }
                         continue;
                     }
@@ -5475,9 +5666,11 @@ mod gpu {
                                 &func_jaro,
                                 &func_jw,
                                 &func_max3,
+                                &func_gate,
                                 desired,
                                 &mut results,
                                 allow_swap,
+                                &mut stats,
                             );
                             match attempt {
                                 Ok(()) => {
@@ -5551,9 +5744,11 @@ mod gpu {
                 &func_jaro,
                 &func_jw,
                 &func_max3,
+                &func_gate,
                 actual_len,
                 &mut results,
                 allow_swap,
+                &mut stats,
             );
             match attempt {
                 Ok(()) => {
@@ -5610,6 +5805,28 @@ mod gpu {
             swap_candidates,
             results.len()
         );
+        stats.matches_emitted = results.len() as u64;
+        stats.total_wall_time_us = wall_start.elapsed().as_micros();
+        log::info!(
+            "[GPU_FUZZY_STATS] mode={} rows=({},{}) candidates={} uploaded={} keep={} reject={} cpu_classified={} matches={} false_negatives={} kernels={} h2d_us={} kernel_us={} d2h_us={} cpu_us={} total_us={}",
+            gate_mode.as_str(),
+            stats.input_rows_left,
+            stats.input_rows_right,
+            stats.candidate_pairs_seen,
+            stats.pairs_uploaded,
+            stats.gpu_gate_keep,
+            stats.gpu_gate_reject,
+            stats.cpu_classified,
+            stats.matches_emitted,
+            stats.shadow_false_negative_count,
+            stats.gpu_kernel_launch_count,
+            stats.h2d_time_us,
+            stats.kernel_time_us,
+            stats.d2h_time_us,
+            stats.cpu_classification_time_us,
+            stats.total_wall_time_us
+        );
+        record_last_gpu_fuzzy_stats(&stats);
 
         Ok(results)
     }
@@ -5744,6 +5961,138 @@ mod tests {
             (pairs[0].confidence - 100.0).abs() < f32::EPSILON,
             "confidence should be 100 for identical names when swap is allowed"
         );
+    }
+
+    #[cfg(feature = "gpu")]
+    fn canonical_pairs(pairs: &[MatchPair]) -> Vec<(i64, i64, i32, Vec<String>)> {
+        let mut out = pairs
+            .iter()
+            .map(|pair| {
+                (
+                    pair.person1.id,
+                    pair.person2.id,
+                    (pair.confidence * 10_000.0).round() as i32,
+                    pair.matched_fields.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        out
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_fuzzy_gate_modes_preserve_l10_output_and_reduce_cpu_classification() {
+        crate::matching::gpu::GpuFuzzyContext::get()
+            .expect("required GPU test: CUDA fuzzy context must be available");
+
+        let a = vec![
+            p(1, "Maria", Some("Clara"), "Santos", (1990, 1, 1)),
+            p(2, "Roberto", Some("Miguel"), "Reyes", (1990, 1, 1)),
+        ];
+        let b = vec![
+            p(101, "Maria", Some("Clara"), "Santoz", (1990, 1, 1)),
+            p(102, "Mzzzzzz", Some("Qqqqq"), "Santos", (1990, 1, 1)),
+            p(103, "Rzzzzzz", Some("Qqqqq"), "Reyes", (1990, 1, 1)),
+        ];
+        let opts = MatchOptions {
+            backend: ComputeBackend::Gpu,
+            gpu: Some(GpuConfig {
+                device_id: None,
+                mem_budget_mb: 512,
+            }),
+            progress: ProgressConfig::default(),
+            allow_birthdate_swap: false,
+        };
+
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
+        let legacy = match_fuzzy_gpu(&a, &b, opts.clone(), &|_u: ProgressUpdate| {})
+            .expect("legacy GPU fuzzy path should run");
+        let legacy_stats = last_gpu_fuzzy_stats().expect("legacy stats should be recorded");
+
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Shadow);
+        let shadow = match_fuzzy_gpu(&a, &b, opts.clone(), &|_u: ProgressUpdate| {})
+            .expect("shadow GPU fuzzy gate should run");
+        let shadow_stats = last_gpu_fuzzy_stats().expect("shadow stats should be recorded");
+
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::GateOnly);
+        let gate_only = match_fuzzy_gpu(&a, &b, opts, &|_u: ProgressUpdate| {})
+            .expect("gate-only GPU fuzzy gate should run");
+        let gate_stats = last_gpu_fuzzy_stats().expect("gate-only stats should be recorded");
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
+
+        eprintln!(
+            "[gpu-gate-canary:L10] off={legacy_stats:?} shadow={shadow_stats:?} gate_only={gate_stats:?}"
+        );
+        assert_eq!(canonical_pairs(&shadow), canonical_pairs(&legacy));
+        assert_eq!(canonical_pairs(&gate_only), canonical_pairs(&legacy));
+        assert_eq!(shadow_stats.shadow_false_negative_count, 0);
+        assert!(shadow_stats.pairs_uploaded > 0);
+        assert_eq!(
+            shadow_stats.gpu_gate_keep + shadow_stats.gpu_gate_reject,
+            shadow_stats.pairs_uploaded
+        );
+        assert!(gate_stats.gpu_kernel_launch_count > 0);
+        assert!(gate_stats.gpu_gate_reject > 0);
+        assert!(legacy_stats.cpu_classified > gate_stats.cpu_classified);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_fuzzy_gate_modes_preserve_l11_no_middle_output() {
+        crate::matching::gpu::GpuFuzzyContext::get()
+            .expect("required GPU test: CUDA fuzzy context must be available");
+
+        let a = vec![
+            p(11, "Carlos", Some("X"), "Dela Cruz", (1992, 3, 3)),
+            p(12, "Ana", None, "Santos", (1992, 3, 3)),
+        ];
+        let b = vec![
+            p(111, "Karlos", Some("Other"), "Dela Cruz", (1992, 3, 3)),
+            p(112, "Czzzz", Some("Other"), "Dela Cruz", (1992, 3, 3)),
+            p(113, "Azzzz", None, "Santos", (1992, 3, 3)),
+        ];
+        let opts = MatchOptions {
+            backend: ComputeBackend::Gpu,
+            gpu: Some(GpuConfig {
+                device_id: None,
+                mem_budget_mb: 512,
+            }),
+            progress: ProgressConfig::default(),
+            allow_birthdate_swap: true,
+        };
+
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
+        let legacy = crate::matching::gpu::match_fuzzy_no_mid_gpu(
+            &a,
+            &b,
+            opts.clone(),
+            &|_u: ProgressUpdate| {},
+        )
+        .expect("legacy L11 GPU fuzzy path should run");
+
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Shadow);
+        let shadow = crate::matching::gpu::match_fuzzy_no_mid_gpu(&a, &b, opts.clone(), &|_u| {})
+            .expect("shadow L11 GPU fuzzy gate should run");
+        let shadow_stats = last_gpu_fuzzy_stats().expect("shadow stats should be recorded");
+
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::GateOnly);
+        let gate_only = crate::matching::gpu::match_fuzzy_no_mid_gpu(&a, &b, opts, &|_u| {})
+            .expect("gate-only L11 GPU fuzzy gate should run");
+        let gate_stats = last_gpu_fuzzy_stats().expect("gate-only stats should be recorded");
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
+
+        eprintln!("[gpu-gate-canary:L11] shadow={shadow_stats:?} gate_only={gate_stats:?}");
+        assert_eq!(canonical_pairs(&shadow), canonical_pairs(&legacy));
+        assert_eq!(canonical_pairs(&gate_only), canonical_pairs(&legacy));
+        assert_eq!(shadow_stats.shadow_false_negative_count, 0);
+        assert!(shadow_stats.pairs_uploaded > 0);
+        assert_eq!(
+            shadow_stats.gpu_gate_keep + shadow_stats.gpu_gate_reject,
+            shadow_stats.pairs_uploaded
+        );
+        assert!(gate_stats.gpu_kernel_launch_count > 0);
+        assert!(gate_stats.gpu_gate_reject > 0);
     }
 
     #[test]

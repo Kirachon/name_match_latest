@@ -24,6 +24,7 @@ use cudarc::driver::{
     CudaContext, CudaFunction, CudaStream, LaunchConfig, PinnedHostSlice, PushKernelArg,
 };
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 fn gpu_batch_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -75,6 +76,16 @@ fn gpu_name_string(cache: &FuzzyCache) -> &str {
     } else {
         &cache.simple_full
     }
+}
+
+#[inline]
+fn gpu_metaphone_equal(cache1: &FuzzyCache, cache2: &FuzzyCache) -> u8 {
+    let (a, b) = if super::gpu_no_mid_mode() {
+        (&cache1.dmeta_code_no_mid, &cache2.dmeta_code_no_mid)
+    } else {
+        (&cache1.dmeta_code, &cache2.dmeta_code)
+    };
+    u8::from(!a.is_empty() && !b.is_empty() && a == b)
 }
 
 /// Lightweight structure representing a candidate pair to be processed by GPU.
@@ -131,6 +142,8 @@ pub struct GpuBatchAccumulator {
     b_bytes: Vec<u8>,
     b_offsets: Vec<i32>,
     b_lengths: Vec<i32>,
+    mp_eq: Vec<u8>,
+    force_keep: Vec<u8>,
 
     // Optional pinned host staging buffers (reused when sizes match)
     pinned_a_bytes: Option<PinnedHostSlice<u8>>,
@@ -160,6 +173,8 @@ impl GpuBatchAccumulator {
             b_bytes: Vec::new(),
             b_offsets: Vec::new(),
             b_lengths: Vec::new(),
+            mp_eq: Vec::new(),
+            force_keep: Vec::new(),
             pinned_a_bytes: None,
             pinned_a_offsets: None,
             pinned_a_lengths: None,
@@ -230,6 +245,7 @@ impl GpuBatchAccumulator {
     /// * `func_jaro` - Jaro kernel function
     /// * `func_jw` - Jaro-Winkler kernel function
     /// * `func_max3` - Max3 kernel function
+    /// * `func_gate` - Lossless fuzzy keep/reject gate kernel function
     /// * `tile_max` - Maximum tile size for OOM backoff
     /// * `results` - Output vector for matching pairs
     ///
@@ -241,7 +257,7 @@ impl GpuBatchAccumulator {
     /// - Kernel launch failures
     /// - OOM errors (triggers backoff and retry)
     #[allow(clippy::too_many_arguments)]
-    pub fn flush_to_gpu(
+    pub(super) fn flush_to_gpu(
         &mut self,
         _n1: &[NormalizedPerson],
         _n2: &[NormalizedPerson],
@@ -256,9 +272,11 @@ impl GpuBatchAccumulator {
         func_jaro: &CudaFunction,
         func_jw: &CudaFunction,
         func_max3: &CudaFunction,
+        func_gate: &CudaFunction,
         _tile_max: usize,
         results: &mut Vec<MatchPair>,
         allow_swap: bool,
+        stats: &mut GpuFuzzyStats,
     ) -> Result<()> {
         // Early return if no pairs to process
         if self.pairs.is_empty() {
@@ -272,6 +290,8 @@ impl GpuBatchAccumulator {
         // Build string arrays from accumulated pairs (reuse logic from match_fuzzy_gpu lines 2735-2745)
         let pairs = &self.pairs;
         let n_pairs = pairs.len();
+        let gate_mode = current_gpu_fuzzy_gate_mode();
+        stats.pairs_uploaded += n_pairs as u64;
         let mut use_pinned = gpu_pinned_host_enabled();
         let mut a_total: usize = 0;
         let mut b_total: usize = 0;
@@ -283,6 +303,21 @@ impl GpuBatchAccumulator {
         }
         if use_pinned && (a_total == 0 || b_total == 0) {
             use_pinned = false;
+        }
+        self.mp_eq.clear();
+        self.mp_eq.reserve_exact(n_pairs);
+        self.force_keep.clear();
+        self.force_keep.reserve_exact(n_pairs);
+        for pair in pairs {
+            let name1 = gpu_name_string(&cache1[pair.outer_idx]);
+            let name2 = gpu_name_string(&cache2[pair.inner_idx]);
+            self.mp_eq.push(gpu_metaphone_equal(
+                &cache1[pair.outer_idx],
+                &cache2[pair.inner_idx],
+            ));
+            self.force_keep.push(u8::from(
+                name1.len() > 64 || name2.len() > 64 || !name1.is_ascii() || !name2.is_ascii(),
+            ));
         }
 
         let (a_bytes, a_offsets, a_lengths, b_bytes, b_offsets, b_lengths) = (
@@ -422,8 +457,8 @@ impl GpuBatchAccumulator {
             }
         }
 
-        // Launch GPU kernels (reuse logic from match_fuzzy_gpu lines 2761-2799)
-        // Transfer arrays to GPU device memory
+        // Transfer arrays to GPU device memory.
+        let h2d_start = Instant::now();
         let d_a = if use_pinned {
             let buf = self
                 .pinned_a_bytes
@@ -478,12 +513,15 @@ impl GpuBatchAccumulator {
         } else {
             stream.memcpy_stod(b_lengths.as_slice())?
         };
-
-        // Allocate GPU output buffers
-        let mut d_lev = stream.alloc_zeros::<f32>(n_pairs)?;
-        let mut d_j = stream.alloc_zeros::<f32>(n_pairs)?;
-        let mut d_w = stream.alloc_zeros::<f32>(n_pairs)?;
-        let mut d_final = stream.alloc_zeros::<f32>(n_pairs)?;
+        let d_mp_eq = if matches!(
+            gate_mode,
+            GpuFuzzyGateMode::Shadow | GpuFuzzyGateMode::GateOnly
+        ) {
+            Some(stream.memcpy_stod(self.mp_eq.as_slice())?)
+        } else {
+            None
+        };
+        stats.h2d_time_us += h2d_start.elapsed().as_micros();
 
         // [GPU_OPT1] Adaptive block size based on GPU architecture
         let gpu_props = crate::matching::gpu_config::query_gpu_properties(0).unwrap_or_else(|_| {
@@ -507,64 +545,114 @@ impl GpuBatchAccumulator {
         };
         let n_i32 = n_pairs as i32;
 
-        // Launch Levenshtein kernel
-        let mut b1 = stream.launch_builder(func);
-        b1.arg(&d_a)
-            .arg(&d_a_off)
-            .arg(&d_a_len)
-            .arg(&d_b)
-            .arg(&d_b_off)
-            .arg(&d_b_len)
-            .arg(&mut d_lev)
-            .arg(&n_i32);
-        unsafe {
-            b1.launch(cfg)?;
-        }
+        let mut keep_flags: Option<Vec<u8>> = None;
+        match gate_mode {
+            GpuFuzzyGateMode::Off => {
+                // Legacy metric path: kernels are executed for audit/compatibility, but CPU
+                // classification below remains authoritative.
+                let mut d_lev = stream.alloc_zeros::<f32>(n_pairs)?;
+                let mut d_j = stream.alloc_zeros::<f32>(n_pairs)?;
+                let mut d_w = stream.alloc_zeros::<f32>(n_pairs)?;
+                let mut d_final = stream.alloc_zeros::<f32>(n_pairs)?;
 
-        // Launch Jaro kernel
-        let mut b2 = stream.launch_builder(func_jaro);
-        b2.arg(&d_a)
-            .arg(&d_a_off)
-            .arg(&d_a_len)
-            .arg(&d_b)
-            .arg(&d_b_off)
-            .arg(&d_b_len)
-            .arg(&mut d_j)
-            .arg(&n_i32);
-        unsafe {
-            b2.launch(cfg)?;
-        }
+                let kernel_start = Instant::now();
+                let mut b1 = stream.launch_builder(func);
+                b1.arg(&d_a)
+                    .arg(&d_a_off)
+                    .arg(&d_a_len)
+                    .arg(&d_b)
+                    .arg(&d_b_off)
+                    .arg(&d_b_len)
+                    .arg(&mut d_lev)
+                    .arg(&n_i32);
+                unsafe {
+                    b1.launch(cfg)?;
+                }
 
-        // Launch Jaro-Winkler kernel
-        let mut b3 = stream.launch_builder(func_jw);
-        b3.arg(&d_a)
-            .arg(&d_a_off)
-            .arg(&d_a_len)
-            .arg(&d_b)
-            .arg(&d_b_off)
-            .arg(&d_b_len)
-            .arg(&mut d_w)
-            .arg(&n_i32);
-        unsafe {
-            b3.launch(cfg)?;
-        }
+                let mut b2 = stream.launch_builder(func_jaro);
+                b2.arg(&d_a)
+                    .arg(&d_a_off)
+                    .arg(&d_a_len)
+                    .arg(&d_b)
+                    .arg(&d_b_off)
+                    .arg(&d_b_len)
+                    .arg(&mut d_j)
+                    .arg(&n_i32);
+                unsafe {
+                    b2.launch(cfg)?;
+                }
 
-        // Launch Max3 kernel
-        let mut b4 = stream.launch_builder(func_max3);
-        b4.arg(&d_lev)
-            .arg(&d_j)
-            .arg(&d_w)
-            .arg(&mut d_final)
-            .arg(&n_i32);
-        unsafe {
-            b4.launch(cfg)?;
-        }
+                let mut b3 = stream.launch_builder(func_jw);
+                b3.arg(&d_a)
+                    .arg(&d_a_off)
+                    .arg(&d_a_len)
+                    .arg(&d_b)
+                    .arg(&d_b_off)
+                    .arg(&d_b_len)
+                    .arg(&mut d_w)
+                    .arg(&n_i32);
+                unsafe {
+                    b3.launch(cfg)?;
+                }
 
-        // Read back GPU outputs only when explicitly enabled (not used for classification).
-        if gpu_fuzzy_readback_enabled() {
-            let _final_scores: Vec<f32> = stream.memcpy_dtov(&d_final)?;
-            let _lev_scores: Vec<f32> = stream.memcpy_dtov(&d_lev)?;
-            let _jw_scores: Vec<f32> = stream.memcpy_dtov(&d_w)?;
+                let mut b4 = stream.launch_builder(func_max3);
+                b4.arg(&d_lev)
+                    .arg(&d_j)
+                    .arg(&d_w)
+                    .arg(&mut d_final)
+                    .arg(&n_i32);
+                unsafe {
+                    b4.launch(cfg)?;
+                }
+                stream.synchronize()?;
+                stats.kernel_time_us += kernel_start.elapsed().as_micros();
+                stats.gpu_kernel_launch_count += 4;
+
+                if gpu_fuzzy_readback_enabled() {
+                    let d2h_start = Instant::now();
+                    let _final_scores: Vec<f32> = stream.memcpy_dtov(&d_final)?;
+                    let _lev_scores: Vec<f32> = stream.memcpy_dtov(&d_lev)?;
+                    let _jw_scores: Vec<f32> = stream.memcpy_dtov(&d_w)?;
+                    stats.d2h_time_us += d2h_start.elapsed().as_micros();
+                }
+            }
+            GpuFuzzyGateMode::Shadow | GpuFuzzyGateMode::GateOnly => {
+                let mut d_keep = stream.alloc_zeros::<u8>(n_pairs)?;
+                let d_mp_eq = d_mp_eq
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("GPU fuzzy gate mode missing metaphone mask"))?;
+                let kernel_start = Instant::now();
+                let mut gate = stream.launch_builder(func_gate);
+                gate.arg(&d_a)
+                    .arg(&d_a_off)
+                    .arg(&d_a_len)
+                    .arg(&d_b)
+                    .arg(&d_b_off)
+                    .arg(&d_b_len)
+                    .arg(d_mp_eq)
+                    .arg(&mut d_keep)
+                    .arg(&n_i32);
+                unsafe {
+                    gate.launch(cfg)?;
+                }
+                stream.synchronize()?;
+                stats.kernel_time_us += kernel_start.elapsed().as_micros();
+                stats.gpu_kernel_launch_count += 1;
+
+                let d2h_start = Instant::now();
+                let mut flags: Vec<u8> = stream.memcpy_dtov(&d_keep)?;
+                stats.d2h_time_us += d2h_start.elapsed().as_micros();
+                for (flag, force_keep) in flags.iter_mut().zip(self.force_keep.iter()) {
+                    if *force_keep != 0 {
+                        *flag = 1;
+                    }
+                }
+                let keep = flags.iter().filter(|&&flag| flag != 0).count() as u64;
+                let reject = flags.len() as u64 - keep;
+                stats.gpu_gate_keep += keep;
+                stats.gpu_gate_reject += reject;
+                keep_flags = Some(flags);
+            }
         }
 
         // Post-processing: birthdate match (with optional month/day swap) + authoritative classification.
@@ -575,7 +663,17 @@ impl GpuBatchAccumulator {
         let mut bd_fail = 0usize;
         let mut swap_pass = 0usize;
         let mut swap_fail = 0usize;
+        let cpu_start = Instant::now();
+        let batch_results_before = results.len();
         for (k, pair) in self.pairs.iter().enumerate() {
+            let gate_keep = keep_flags
+                .as_ref()
+                .map(|flags| flags.get(k).copied().unwrap_or(0) != 0)
+                .unwrap_or(true);
+            if matches!(gate_mode, GpuFuzzyGateMode::GateOnly) && !gate_keep {
+                continue;
+            }
+
             // Birthdate check using birthdate_matches (supports month/day swap when allow_swap=true)
             let (bd_match, is_swap) =
                 match (t1[pair.outer_idx].birthdate, t2[pair.inner_idx].birthdate) {
@@ -600,6 +698,7 @@ impl GpuBatchAccumulator {
             }
 
             // Use CPU In-Memory classification logic for parity
+            stats.cpu_classified += 1;
             let cls = if super::gpu_no_mid_mode() {
                 super::classify_pair_cached_no_mid(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
             } else {
@@ -634,6 +733,16 @@ impl GpuBatchAccumulator {
             };
 
             if let Some((score, label)) = cls {
+                if matches!(gate_mode, GpuFuzzyGateMode::Shadow) && !gate_keep {
+                    stats.shadow_false_negative_count += 1;
+                    log::error!(
+                        "[GPU_GATE] Shadow false negative: id1={}, id2={}, score={:.4}, label={}",
+                        t1[pair.outer_idx].id,
+                        t2[pair.inner_idx].id,
+                        score,
+                        label
+                    );
+                }
                 results.push(MatchPair {
                     person1: t1[pair.outer_idx].clone(),
                     person2: t2[pair.inner_idx].clone(),
@@ -655,12 +764,15 @@ impl GpuBatchAccumulator {
                 );
             }
         }
+        stats.cpu_classification_time_us += cpu_start.elapsed().as_micros();
+        stats.matches_emitted += (results.len() - batch_results_before) as u64;
 
         if gpu_batch_log_enabled() {
             log::info!(
-                "[GPU_BATCH] Processed {} pairs, found {} matches (bd_pass={}, bd_fail={}, swap_pass={}, swap_fail={})",
+                "[GPU_BATCH] Processed {} pairs, found {} matches (mode={}, bd_pass={}, bd_fail={}, swap_pass={}, swap_fail={})",
                 n_pairs,
-                results.len(),
+                results.len() - batch_results_before,
+                gate_mode.as_str(),
                 bd_pass,
                 bd_fail,
                 swap_pass,

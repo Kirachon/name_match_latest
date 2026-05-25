@@ -217,6 +217,9 @@ pub struct GpuOptionsDto {
     /// Enable dynamic GPU tuning (auto-adjust batch sizes).
     #[serde(default)]
     pub dynamic_tuning: bool,
+    /// L10/L11 lossless GPU fuzzy gate rollout mode.
+    #[serde(default)]
+    pub fuzzy_gate_mode: GpuFuzzyGateModeDto,
 }
 
 impl Default for GpuOptionsDto {
@@ -228,8 +231,18 @@ impl Default for GpuOptionsDto {
             use_levenshtein_full_scoring: false,
             vram_budget_mb: None,
             dynamic_tuning: false,
+            fuzzy_gate_mode: GpuFuzzyGateModeDto::Off,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum GpuFuzzyGateModeDto {
+    #[default]
+    Off,
+    Shadow,
+    GateOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

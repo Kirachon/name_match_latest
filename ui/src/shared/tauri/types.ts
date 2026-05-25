@@ -142,7 +142,10 @@ export interface GpuOptionsDto {
   use_levenshtein_full_scoring: boolean;
   vram_budget_mb?: number | null;
   dynamic_tuning: boolean;
+  fuzzy_gate_mode: GpuFuzzyGateModeDto;
 }
+
+export type GpuFuzzyGateModeDto = "off" | "shadow" | "gate-only";
 
 export interface StreamingOptionsDto {
   mode: RunModeDto;
@@ -711,6 +714,7 @@ export const DEFAULT_GPU_OPTIONS: GpuOptionsDto = {
   use_levenshtein_full_scoring: false,
   vram_budget_mb: null,
   dynamic_tuning: false,
+  fuzzy_gate_mode: "off",
 };
 
 export const DEFAULT_STREAMING_OPTIONS: StreamingOptionsDto = {
