@@ -541,14 +541,18 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS result_person_lookup (
                 job_id TEXT NOT NULL,
                 side TEXT NOT NULL,
+                person_ordinal INTEGER NOT NULL,
                 person_id INTEGER NOT NULL,
                 person_json TEXT NOT NULL,
-                PRIMARY KEY (job_id, side, person_id),
+                PRIMARY KEY (job_id, side, person_ordinal),
                 FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
             );
+            CREATE INDEX IF NOT EXISTS idx_result_person_lookup_person
+                ON result_person_lookup(job_id, side, person_id);
             "#,
         )?;
         ensure_jobs_schema(&conn)?;
+        ensure_person_lookup_schema(&conn)?;
         ensure_decisions_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -595,12 +599,13 @@ impl SqliteStore {
             ("source", &job.source_people),
             ("target", &job.target_people),
         ] {
-            for person in people {
+            for (person_ordinal, person) in people.iter().enumerate() {
                 tx.execute(
-                    "INSERT INTO result_person_lookup(job_id, side, person_id, person_json) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO result_person_lookup(job_id, side, person_ordinal, person_id, person_json) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         job.summary.job_id,
                         side,
+                        person_ordinal as i64,
                         person.id,
                         serde_json::to_string(person)?,
                     ],
@@ -660,7 +665,7 @@ impl SqliteStore {
             .collect::<Result<Vec<MatchPairDto>>>()?;
         let load_people = |side: &str| -> Result<Vec<Person>> {
             let mut stmt = conn.prepare(
-                "SELECT person_json FROM result_person_lookup WHERE job_id = ?1 AND side = ?2 ORDER BY person_id ASC",
+                "SELECT person_json FROM result_person_lookup WHERE job_id = ?1 AND side = ?2 ORDER BY person_ordinal ASC",
             )?;
             stmt.query_map(params![job_id, side], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?
@@ -756,6 +761,86 @@ fn ensure_jobs_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_person_lookup_schema(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(result_person_lookup)")?;
+    let columns = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let has_person_ordinal = columns.iter().any(|(column, _)| column == "person_ordinal");
+    let ordinal_is_primary = columns
+        .iter()
+        .any(|(column, pk)| column == "person_ordinal" && *pk > 0);
+    if columns.is_empty() || (has_person_ordinal && ordinal_is_primary) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS result_person_lookup (
+                job_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                person_ordinal INTEGER NOT NULL,
+                person_id INTEGER NOT NULL,
+                person_json TEXT NOT NULL,
+                PRIMARY KEY (job_id, side, person_ordinal),
+                FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_result_person_lookup_person
+                ON result_person_lookup(job_id, side, person_id);
+            "#,
+        )?;
+        return Ok(());
+    }
+
+    let existing_rows = {
+        let mut stmt = conn.prepare(
+            "SELECT job_id, side, person_id, person_json FROM result_person_lookup ORDER BY rowid ASC",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    conn.execute("DROP TABLE IF EXISTS result_person_lookup_old", [])?;
+    conn.execute(
+        "ALTER TABLE result_person_lookup RENAME TO result_person_lookup_old",
+        [],
+    )?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE result_person_lookup (
+            job_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            person_ordinal INTEGER NOT NULL,
+            person_id INTEGER NOT NULL,
+            person_json TEXT NOT NULL,
+            PRIMARY KEY (job_id, side, person_ordinal),
+            FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_result_person_lookup_person
+            ON result_person_lookup(job_id, side, person_id);
+        "#,
+    )?;
+    let mut next_ordinal: HashMap<(String, String), i64> = HashMap::new();
+    for (job_id, side, person_id, person_json) in existing_rows {
+        let ordinal = next_ordinal
+            .entry((job_id.clone(), side.clone()))
+            .and_modify(|value| *value += 1)
+            .or_insert(0);
+        conn.execute(
+            "INSERT INTO result_person_lookup(job_id, side, person_ordinal, person_id, person_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![job_id, side, *ordinal, person_id, person_json],
+        )?;
+    }
+    conn.execute("DROP TABLE result_person_lookup_old", [])?;
+    Ok(())
+}
+
 fn ensure_decisions_schema(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(decisions)")?;
     let columns = stmt
@@ -837,6 +922,19 @@ mod tests {
 
     fn sqlite_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("nm_result_store_{name}_{}.sqlite3", now_ms()))
+    }
+
+    fn mk_person(id: i64, first_name: &str, last_name: &str) -> Person {
+        Person {
+            id,
+            uuid: None,
+            first_name: Some(first_name.to_string()),
+            middle_name: None,
+            last_name: Some(last_name.to_string()),
+            birthdate: None,
+            hh_id: None,
+            extra_fields: Default::default(),
+        }
     }
 
     #[test]
@@ -1279,6 +1377,44 @@ mod tests {
             .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.rows[0].source_full_name, "Ana Santos");
+    }
+
+    #[test]
+    fn sqlite_store_preserves_person_snapshots_with_duplicate_ids() {
+        let path = sqlite_path("duplicate_person_ids");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve(
+            "duplicates".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            10,
+        );
+
+        store
+            .set_person_snapshots(
+                "duplicates",
+                vec![
+                    mk_person(7, "Ana", "Santos"),
+                    mk_person(7, "Ana Maria", "Santos"),
+                ],
+                vec![
+                    mk_person(9, "Ben", "Reyes"),
+                    mk_person(9, "Benjamin", "Reyes"),
+                ],
+            )
+            .unwrap();
+        drop(store);
+
+        let reloaded = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        let snapshot = reloaded.snapshot("duplicates").expect("snapshot");
+        assert_eq!(snapshot.source_people.len(), 2);
+        assert_eq!(snapshot.target_people.len(), 2);
+        assert_eq!(snapshot.source_people[0].first_name.as_deref(), Some("Ana"));
+        assert_eq!(
+            snapshot.source_people[1].first_name.as_deref(),
+            Some("Ana Maria")
+        );
     }
 
     #[test]
