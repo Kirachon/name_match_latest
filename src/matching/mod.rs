@@ -5968,10 +5968,15 @@ mod tests {
         let mut out = pairs
             .iter()
             .map(|pair| {
+                let confidence = if pair.confidence > 1.0 {
+                    pair.confidence / 100.0
+                } else {
+                    pair.confidence
+                };
                 (
                     pair.person1.id,
                     pair.person2.id,
-                    (pair.confidence * 10_000.0).round() as i32,
+                    (confidence * 10_000.0).round() as i32,
                     pair.matched_fields.clone(),
                 )
             })
@@ -6005,6 +6010,12 @@ mod tests {
             allow_birthdate_swap: false,
         };
 
+        crate::matching::birthdate_matcher::set_allow_birthdate_swap(false);
+        let cpu_start = std::time::Instant::now();
+        let cpu = match_fuzzy_cpu_gpu_equivalent(&a, &b, &|_u: ProgressUpdate| {});
+        let cpu_wall_us = cpu_start.elapsed().as_micros();
+        crate::matching::birthdate_matcher::clear_allow_birthdate_swap_override();
+
         set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
         let legacy = match_fuzzy_gpu(&a, &b, opts.clone(), &|_u: ProgressUpdate| {})
             .expect("legacy GPU fuzzy path should run");
@@ -6022,8 +6033,9 @@ mod tests {
         set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
 
         eprintln!(
-            "[gpu-gate-canary:L10] off={legacy_stats:?} shadow={shadow_stats:?} gate_only={gate_stats:?}"
+            "[gpu-gate-canary:L10] cpu_wall_us={cpu_wall_us} off={legacy_stats:?} shadow={shadow_stats:?} gate_only={gate_stats:?}"
         );
+        assert_eq!(canonical_pairs(&legacy), canonical_pairs(&cpu));
         assert_eq!(canonical_pairs(&shadow), canonical_pairs(&legacy));
         assert_eq!(canonical_pairs(&gate_only), canonical_pairs(&legacy));
         assert_eq!(shadow_stats.shadow_false_negative_count, 0);
@@ -6048,7 +6060,7 @@ mod tests {
             p(12, "Ana", None, "Santos", (1992, 3, 3)),
         ];
         let b = vec![
-            p(111, "Karlos", Some("Other"), "Dela Cruz", (1992, 3, 3)),
+            p(111, "Carlas", Some("Other"), "Dela Cruz", (1992, 3, 3)),
             p(112, "Czzzz", Some("Other"), "Dela Cruz", (1992, 3, 3)),
             p(113, "Azzzz", None, "Santos", (1992, 3, 3)),
         ];
@@ -6061,6 +6073,12 @@ mod tests {
             progress: ProgressConfig::default(),
             allow_birthdate_swap: true,
         };
+
+        crate::matching::birthdate_matcher::set_allow_birthdate_swap(true);
+        let cpu_start = std::time::Instant::now();
+        let cpu = match_fuzzy_no_mid_cpu_gpu_equivalent(&a, &b, &|_u: ProgressUpdate| {});
+        let cpu_wall_us = cpu_start.elapsed().as_micros();
+        crate::matching::birthdate_matcher::clear_allow_birthdate_swap_override();
 
         set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
         let legacy = crate::matching::gpu::match_fuzzy_no_mid_gpu(
@@ -6082,7 +6100,10 @@ mod tests {
         let gate_stats = last_gpu_fuzzy_stats().expect("gate-only stats should be recorded");
         set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
 
-        eprintln!("[gpu-gate-canary:L11] shadow={shadow_stats:?} gate_only={gate_stats:?}");
+        eprintln!(
+            "[gpu-gate-canary:L11] cpu_wall_us={cpu_wall_us} shadow={shadow_stats:?} gate_only={gate_stats:?}"
+        );
+        assert_eq!(canonical_pairs(&legacy), canonical_pairs(&cpu));
         assert_eq!(canonical_pairs(&shadow), canonical_pairs(&legacy));
         assert_eq!(canonical_pairs(&gate_only), canonical_pairs(&legacy));
         assert_eq!(shadow_stats.shadow_false_negative_count, 0);
