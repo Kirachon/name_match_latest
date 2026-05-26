@@ -252,8 +252,8 @@ The goal is not complete until this sequence either passes or a concrete blocker
 | Test | Rust lib, GPU lib, CPU release, GUI release, Tauri CPU/GPU release, UI lint/test/build all passed. | Passed |
 | Benchmark and speed results | `tmp/perf/results/loader-comparison.md` shows streaming loader p95 changes: small `-4.80%`, medium `-6.09%`, high-collision birthdate `-1.37%`, high-collision birth-year `-3.04%`, L10/L11 fuzzy-heavy `+1.45%` within gate. GPU canary GateOnly reduced CPU classification from 3 to 1 for L10/L11, with canary wall-time improvement from Shadow to GateOnly. | Passed for loader and GPU canary; broader GPU benchmark still gated |
 | GPU features work | `cuda_probe` built and ran on NVIDIA GeForce RTX 4050 Laptop GPU; GPU lib tests passed; Tauri GPU release build passed. `gpu_audit.exe` built but runtime audit was blocked by local MySQL access denied. | Partially Passed |
-| Auto review | Full and focused AI auto-review attempts were blocked by review-tool timeout/usage-limit errors. Deterministic local auto-review passed over pushed range `ffba0da^..55ae565` with zero findings: `git diff --check`, PowerShell parser checks, secret-pattern scan, and safety-invariant checks. | Passed by deterministic local auto-review; LLM review externally blocked |
-| Commit and push | Completed with scoped performance-remediation commit `ffba0da` pushed to `origin/main`. Unrelated pre-existing/untracked import/UI/archive/image changes were left unstaged. | Passed |
+| Auto review | Full and focused AI auto-review attempts were blocked by review-tool timeout/usage-limit errors. Deterministic local auto-review passed over pushed range `ffba0da^..55ae565` with zero findings: `git diff --check`, PowerShell parser checks, secret-pattern scan, and safety-invariant checks. Final whitespace review over `ffba0da^..HEAD` also passed. | Passed by deterministic local auto-review; LLM review externally blocked |
+| Commit and push | Completed with scoped performance-remediation commits through `f0fa22e` pushed to `origin/main`. Unrelated pre-existing/untracked import/UI/archive/image changes were left unstaged. | Passed |
 
 ### Current Blockers
 
