@@ -36,6 +36,7 @@ pub mod matching;
 pub mod metrics;
 pub mod models;
 pub mod normalize;
+pub mod perf;
 pub mod util;
 
 pub mod optimization;

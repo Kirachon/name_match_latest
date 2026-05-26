@@ -3,7 +3,9 @@ use crate::error::{AppError, AppResult};
 use crate::state::{AppState, TauriEventSink};
 use name_matcher::db::get_person_rows;
 use name_matcher::db::schema::get_person_rows_mapped;
-use name_matcher::loaders::csv_loader::{load_csv_people, CsvPreviewRequestDto};
+use name_matcher::loaders::csv_loader::{
+    load_csv_people_with_options, CsvLoadOptions, CsvPreviewRequestDto,
+};
 use name_matcher::loaders::excel_loader::{load_excel_people, ExcelPreviewRequestDto};
 use name_matcher::models::Person;
 use name_matcher::run_service::dto::{
@@ -90,7 +92,7 @@ pub async fn start_matching(
     let loader: name_matcher::run_service::TableLoader = Arc::new(
         move |src: &TableSelectionDto,
               tgt: &TableSelectionDto,
-              _cancel: &CancelToken,
+              cancel: &CancelToken,
               _sink: &dyn EventSink| {
             let src_pool = src_pool.clone();
             let tgt_pool = tgt_pool.clone();
@@ -103,8 +105,8 @@ pub async fn start_matching(
                 .build()
                 .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
             let (t1, t2): (Vec<Person>, Vec<Person>) = rt.block_on(async move {
-                let t1 = load_selection_rows(src_pool.as_ref(), &src).await?;
-                let t2 = load_selection_rows(tgt_pool.as_ref(), &tgt).await?;
+                let t1 = load_selection_rows(src_pool.as_ref(), &src, cancel).await?;
+                let t2 = load_selection_rows(tgt_pool.as_ref(), &tgt, cancel).await?;
                 anyhow::Ok((t1, t2))
             })?;
             Ok((t1, t2, src_label, tgt_label))
@@ -137,6 +139,7 @@ fn validate_selection(side: &str, selection: &TableSelectionDto) -> AppResult<()
 async fn load_selection_rows(
     pool: Option<&sqlx::MySqlPool>,
     selection: &TableSelectionDto,
+    cancel: &CancelToken,
 ) -> anyhow::Result<Vec<Person>> {
     match selection.source_kind {
         DataSourceKindDto::Database => {
@@ -162,7 +165,12 @@ async fn load_selection_rows(
                     selection.column_mapping.as_ref(),
                 )
             } else {
-                load_csv_people(
+                let cancel = cancel.clone();
+                let options = CsvLoadOptions {
+                    should_cancel: Some(Arc::new(move || cancel.is_cancelled())),
+                    ..CsvLoadOptions::default()
+                };
+                load_csv_people_with_options(
                     &CsvPreviewRequestDto {
                         path: file.path.clone(),
                         encoding: file.encoding.clone(),
@@ -170,6 +178,7 @@ async fn load_selection_rows(
                         date_format: file.date_format.clone(),
                     },
                     selection.column_mapping.as_ref(),
+                    &options,
                 )
             }
         }

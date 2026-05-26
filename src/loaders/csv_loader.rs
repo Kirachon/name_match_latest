@@ -1,10 +1,14 @@
 use crate::models::{ColumnMapping, Person};
+use crate::perf::StageTimer;
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
+use std::sync::Arc;
 
 const PREVIEW_LIMIT: usize = 5;
 
@@ -69,7 +73,57 @@ pub struct CsvPreviewDto {
     pub total_preview_rows: usize,
 }
 
+#[derive(Clone)]
+pub struct CsvLoadOptions {
+    pub include_extra_fields: bool,
+    pub generate_stable_ids: bool,
+    pub progress_interval_rows: usize,
+    pub should_cancel: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub on_progress_rows: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+}
+
+impl Default for CsvLoadOptions {
+    fn default() -> Self {
+        Self {
+            include_extra_fields: true,
+            generate_stable_ids: true,
+            progress_interval_rows: 10_000,
+            should_cancel: None,
+            on_progress_rows: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CsvHeaderIndex {
+    id: Option<usize>,
+    uuid: Option<usize>,
+    first_name: Option<usize>,
+    middle_name: Option<usize>,
+    last_name: Option<usize>,
+    birthdate: Option<usize>,
+    hh_id: Option<usize>,
+}
+
+impl CsvHeaderIndex {
+    fn new(headers: &[String], mapping: &ColumnMapping) -> Self {
+        Self {
+            id: header_pos(headers, &mapping.id),
+            uuid: mapping.uuid.as_ref().and_then(|name| header_pos(headers, name)),
+            first_name: header_pos(headers, &mapping.first_name),
+            middle_name: mapping
+                .middle_name
+                .as_ref()
+                .and_then(|name| header_pos(headers, name)),
+            last_name: header_pos(headers, &mapping.last_name),
+            birthdate: header_pos(headers, &mapping.birthdate),
+            hh_id: mapping.hh_id.as_ref().and_then(|name| header_pos(headers, name)),
+        }
+    }
+}
+
 pub fn load_csv_preview(request: &CsvPreviewRequestDto) -> Result<CsvPreviewDto> {
+    let timer = StageTimer::start("csv_preview_load");
     let path = Path::new(&request.path);
     if !path.is_file() {
         bail!("CSV file not found: {}", request.path);
@@ -139,7 +193,7 @@ pub fn load_csv_preview(request: &CsvPreviewRequestDto) -> Result<CsvPreviewDto>
     warnings.sort();
     warnings.dedup();
 
-    Ok(CsvPreviewDto {
+    let preview = CsvPreviewDto {
         path: request.path.clone(),
         encoding: detected_encoding,
         delimiter,
@@ -148,27 +202,60 @@ pub fn load_csv_preview(request: &CsvPreviewRequestDto) -> Result<CsvPreviewDto>
         rows,
         warnings,
         date_format,
-    })
+    };
+    timer.finish();
+    Ok(preview)
 }
 
 pub fn load_csv_people(
     request: &CsvPreviewRequestDto,
     mapping: Option<&ColumnMapping>,
 ) -> Result<Vec<Person>> {
+    load_csv_people_with_options(request, mapping, &CsvLoadOptions::default())
+}
+
+pub fn load_csv_people_with_options(
+    request: &CsvPreviewRequestDto,
+    mapping: Option<&ColumnMapping>,
+    options: &CsvLoadOptions,
+) -> Result<Vec<Person>> {
+    let timer = StageTimer::start("csv_people_load");
     let path = Path::new(&request.path);
     if !path.is_file() {
         bail!("CSV file not found: {}", request.path);
     }
-    let bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", request.path))?;
-    let encoding = request
-        .encoding
-        .clone()
-        .unwrap_or_else(|| detect_encoding(&bytes));
-    let text = decode_bytes(&bytes, &encoding)?;
-    let delimiter = request
-        .delimiter
-        .clone()
-        .unwrap_or_else(|| detect_delimiter(&text));
+    let (delimiter, input): (CsvDelimiterDto, Box<dyn Read>) =
+        if let (Some(encoding), Some(delimiter)) = (&request.encoding, &request.delimiter) {
+            if matches!(encoding, CsvEncodingDto::Utf8 | CsvEncodingDto::Utf8Bom) {
+                tracing::info!(
+                    path = %request.path,
+                    encoding = encoding.label(),
+                    delimiter = ?delimiter,
+                    "csv_people_streaming_reader"
+                );
+                let file =
+                    File::open(path).with_context(|| format!("Failed to open {}", request.path))?;
+                (delimiter.clone(), Box::new(BufReader::new(file)))
+            } else {
+                let bytes = std::fs::read(path)
+                    .with_context(|| format!("Failed to read {}", request.path))?;
+                let text = decode_bytes(&bytes, encoding)?;
+                (delimiter.clone(), Box::new(Cursor::new(text.into_bytes())))
+            }
+        } else {
+            let bytes =
+                std::fs::read(path).with_context(|| format!("Failed to read {}", request.path))?;
+            let encoding = request
+                .encoding
+                .clone()
+                .unwrap_or_else(|| detect_encoding(&bytes));
+            let text = decode_bytes(&bytes, &encoding)?;
+            let delimiter = request
+                .delimiter
+                .clone()
+                .unwrap_or_else(|| detect_delimiter(&text));
+            (delimiter, Box::new(Cursor::new(text.into_bytes())))
+        };
     let date_format = request
         .date_format
         .clone()
@@ -177,7 +264,7 @@ pub fn load_csv_people(
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter.byte())
         .flexible(true)
-        .from_reader(text.as_bytes());
+        .from_reader(input);
     let headers = reader
         .headers()
         .context("CSV file has no readable header row")?
@@ -190,31 +277,45 @@ pub fn load_csv_people(
     {
         bail!("CSV column mapping is missing first_name, last_name, or birthdate");
     }
+    let header_index = CsvHeaderIndex::new(&headers, &mapping);
+    let mapped_columns = mapped_column_names(&mapping);
     let mut people = Vec::new();
     let mut seen_ids = HashSet::new();
     for (row_index, record) in reader.records().enumerate() {
+        if let Some(should_cancel) = &options.should_cancel {
+            if should_cancel() {
+                bail!("CSV load cancelled");
+            }
+        }
         let record = record.context("Failed to parse CSV row")?;
-        let row = headers
-            .iter()
-            .zip(record.iter())
-            .map(|(header, value)| (header.as_str(), value.trim()))
-            .collect::<HashMap<_, _>>();
-        let id = stable_row_id(&headers, &row, &mapping)
+        let id = if options.generate_stable_ids {
+            stable_row_id_indexed(&headers, &record, &mapping, &header_index)
+        } else {
+            record
+                .get(header_index.id.context("CSV column mapping is missing id")?)
+                .map(|value| value.trim().parse::<i64>())
+                .transpose()
+                .context("Invalid CSV id")?
+                .context("CSV id value is empty")
+        }
             .with_context(|| format!("Invalid CSV id on row {}", row_index + 2))?;
         if !seen_ids.insert(id) {
             bail!("Duplicate CSV stable id {} on row {}", id, row_index + 2);
         }
-        let birthdate = value_for(&row, &mapping.birthdate)
+        let birthdate = value_at(&record, header_index.birthdate)
             .filter(|v| !v.is_empty())
             .map(|value| NaiveDate::parse_from_str(value, &date_format))
             .transpose()
             .with_context(|| format!("Invalid CSV birthdate for id {}", id))?;
 
-        let mapped_columns = mapped_column_names(&mapping);
         let mut extra_fields = HashMap::new();
-        for (header, value) in &row {
-            if !mapped_columns.contains(*header) {
-                extra_fields.insert((*header).to_string(), (*value).to_string());
+        if options.include_extra_fields {
+            for (idx, header) in headers.iter().enumerate() {
+                if !mapped_columns.contains(header.as_str()) {
+                    if let Some(value) = value_at(&record, Some(idx)) {
+                        extra_fields.insert(header.clone(), value.to_string());
+                    }
+                }
             }
         }
         people.push(Person {
@@ -222,25 +323,41 @@ pub fn load_csv_people(
             uuid: mapping
                 .uuid
                 .as_ref()
-                .and_then(|name| value_for(&row, name))
+                .and_then(|_| value_at(&record, header_index.uuid))
                 .map(str::to_string),
-            first_name: value_for(&row, &mapping.first_name).map(str::to_string),
+            first_name: value_at(&record, header_index.first_name).map(str::to_string),
             middle_name: mapping
                 .middle_name
                 .as_ref()
-                .and_then(|name| value_for(&row, name))
+                .and_then(|_| value_at(&record, header_index.middle_name))
                 .map(str::to_string),
-            last_name: value_for(&row, &mapping.last_name).map(str::to_string),
+            last_name: value_at(&record, header_index.last_name).map(str::to_string),
             birthdate,
             hh_id: mapping
                 .hh_id
                 .as_ref()
-                .and_then(|name| value_for(&row, name))
+                .and_then(|_| value_at(&record, header_index.hh_id))
                 .map(str::to_string),
             extra_fields,
         });
+        if options.progress_interval_rows > 0 && (row_index + 1) % options.progress_interval_rows == 0 {
+            if let Some(on_progress_rows) = &options.on_progress_rows {
+                on_progress_rows(row_index + 1);
+            }
+            tracing::info!(rows = (row_index + 1) as u64, "csv_people_load_progress");
+        }
     }
+    tracing::info!(rows = people.len() as u64, "csv_people_load_summary");
+    timer.finish();
     Ok(people)
+}
+
+fn header_pos(headers: &[String], name: &str) -> Option<usize> {
+    headers.iter().position(|header| header == name)
+}
+
+fn value_at(record: &csv::StringRecord, idx: Option<usize>) -> Option<&str> {
+    record.get(idx?).map(str::trim)
 }
 
 fn detect_encoding(bytes: &[u8]) -> CsvEncodingDto {
@@ -382,6 +499,37 @@ fn stable_row_id(
         fnv1a_update(&mut hash, b"\x1f");
     }
 
+    Ok((hash & 0x7fff_ffff_ffff_ffff) as i64)
+}
+
+fn stable_row_id_indexed(
+    headers: &[String],
+    record: &csv::StringRecord,
+    mapping: &ColumnMapping,
+    header_index: &CsvHeaderIndex,
+) -> Result<i64> {
+    if let Some(id_text) = value_at(record, header_index.id) {
+        if !id_text.is_empty() {
+            return id_text
+                .parse::<i64>()
+                .with_context(|| format!("Invalid CSV id value '{}'", id_text));
+        }
+    }
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for (idx, header) in headers.iter().enumerate() {
+        fnv1a_update(&mut hash, header.as_bytes());
+        fnv1a_update(&mut hash, b"=");
+        if let Some(value) = value_at(record, Some(idx)) {
+            fnv1a_update(&mut hash, value.as_bytes());
+        }
+        fnv1a_update(&mut hash, b"\x1f");
+    }
+
+    tracing::debug!(
+        id_column = mapping.id.as_str(),
+        "csv_stable_id_generated_from_row_hash"
+    );
     Ok((hash & 0x7fff_ffff_ffff_ffff) as i64)
 }
 

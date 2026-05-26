@@ -55,6 +55,7 @@ if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
 # GPU runtime DLLs - discover exact CUDA 12.x filenames from the prepared
 # runtime folder so minor CUDA Toolkit changes do not break packaging.
 $dist = "$repoRoot\src-tauri\target\release"
+New-Item -ItemType Directory -Force $dist | Out-Null
 $expected = @("nvrtc64_*.dll", "nvrtc-builtins64_*.dll")
 $copied = @()
 foreach ($pattern in $expected) {

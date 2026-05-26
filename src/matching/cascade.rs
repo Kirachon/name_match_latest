@@ -18,6 +18,7 @@ use crate::matching::{
     ComputeBackend, GpuConfig, MatchOptions, MatchPair, ProgressConfig, ProgressUpdate,
 };
 use crate::models::Person;
+use crate::perf::StageTimer;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
@@ -94,6 +95,9 @@ pub struct CascadeConfig {
     /// GPU memory budget in MB for fuzzy L10/L11 tiling.
     /// None lets the GPU scorer auto-size from current free VRAM.
     pub gpu_mem_budget_mb: Option<u64>,
+    /// Write per-level CSV files. Keep true for CLI/debug export; disable for
+    /// embedded app runs that consume in-memory level-tagged matches.
+    pub write_level_csv: bool,
 }
 
 impl Default for CascadeConfig {
@@ -108,6 +112,7 @@ impl Default for CascadeConfig {
             compute_backend: ComputeBackend::Cpu,
             gpu_device_id: None,
             gpu_mem_budget_mb: None,
+            write_level_csv: true,
         }
     }
 }
@@ -640,6 +645,7 @@ where
     F: Fn(CascadeProgress),
     G: Fn(ProgressUpdate) + Sync,
 {
+    let cascade_timer = StageTimer::start("cascade_run");
     let start = Instant::now();
     let mut entries = Vec::new();
     let mut total_matches = 0usize;
@@ -685,6 +691,7 @@ where
 
     for level_num in levels_to_run.iter() {
         let level_num = *level_num;
+        let level_timer = StageTimer::start("cascade_level");
         let desc = level_description(level_num).to_string();
 
         on_progress(CascadeProgress {
@@ -807,45 +814,75 @@ where
             match_count
         );
 
-        // Write output file
-        let output_path = level_output_path(&cfg.base_output_path, level_num);
+        let output_path = cfg
+            .write_level_csv
+            .then(|| level_output_path(&cfg.base_output_path, level_num));
+        if cfg.write_level_csv {
+            on_progress(CascadeProgress {
+                current_level: level_num,
+                total_levels,
+                level_description: desc.clone(),
+                phase: CascadePhase::WritingOutput,
+            });
+
+            match write_level_csv(
+                output_path.as_deref().expect("output path present"),
+                &matches,
+                adv_level,
+                &extra_field_names,
+            ) {
+                Ok(_) => {
+                    log::info!(
+                        "Level {} output written to: {}",
+                        level_num,
+                        output_path.as_deref().unwrap_or("-")
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to write Level {} output: {}", level_num, e);
+                    entries.push(CascadeLevelEntry {
+                        level: level_num,
+                        description: desc,
+                        status: CascadeLevelStatus::Failed(format!("Write error: {}", e)),
+                        match_count,
+                        output_path: None,
+                        matches: matches.clone(),
+                    });
+                    tracing::info!(
+                        level = level_num,
+                        matches_found = match_count as u64,
+                        "cascade_level_summary"
+                    );
+                    level_timer.finish();
+                    continue;
+                }
+            }
+        } else {
+            log::info!(
+                "Level {} per-level CSV output skipped by cascade config",
+                level_num
+            );
+        }
         on_progress(CascadeProgress {
             current_level: level_num,
             total_levels,
             level_description: desc.clone(),
-            phase: CascadePhase::WritingOutput,
+            phase: CascadePhase::Completed,
         });
-
-        match write_level_csv(&output_path, &matches, adv_level, &extra_field_names) {
-            Ok(_) => {
-                log::info!("Level {} output written to: {}", level_num, output_path);
-                on_progress(CascadeProgress {
-                    current_level: level_num,
-                    total_levels,
-                    level_description: desc.clone(),
-                    phase: CascadePhase::Completed,
-                });
-                entries.push(CascadeLevelEntry {
-                    level: level_num,
-                    description: desc,
-                    status: CascadeLevelStatus::Completed,
-                    match_count,
-                    output_path: Some(output_path),
-                    matches: matches.clone(),
-                });
-            }
-            Err(e) => {
-                log::error!("Failed to write Level {} output: {}", level_num, e);
-                entries.push(CascadeLevelEntry {
-                    level: level_num,
-                    description: desc,
-                    status: CascadeLevelStatus::Failed(format!("Write error: {}", e)),
-                    match_count,
-                    output_path: None,
-                    matches: matches.clone(),
-                });
-            }
-        }
+        entries.push(CascadeLevelEntry {
+            level: level_num,
+            description: desc,
+            status: CascadeLevelStatus::Completed,
+            match_count,
+            output_path,
+            matches: matches.clone(),
+        });
+        tracing::info!(
+            level = level_num,
+            matches_found = match_count as u64,
+            "cascade_level_summary"
+        );
+        level_timer.finish();
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -856,6 +893,7 @@ where
         duration_ms as f64 / 1000.0,
         cfg.exclusion_mode
     );
+    cascade_timer.finish();
 
     CascadeResult {
         entries,
@@ -873,6 +911,7 @@ fn write_level_csv(
 ) -> std::io::Result<()> {
     use std::io::Write;
 
+    let timer = StageTimer::start("cascade_level_csv_write");
     let file = std::fs::File::create(path)?;
     let mut writer = std::io::BufWriter::new(file);
 
@@ -959,6 +998,12 @@ fn write_level_csv(
     }
 
     writer.flush()?;
+    tracing::info!(
+        rows = matches.len() as u64,
+        path = path,
+        "cascade_level_csv_write_summary"
+    );
+    timer.finish();
     Ok(())
 }
 

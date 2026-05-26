@@ -150,6 +150,32 @@ impl ResultStore {
         }
     }
 
+    pub fn clear_rows(&self, job_id: &str) -> Result<()> {
+        self.set_rows(job_id, Vec::new())
+    }
+
+    pub fn append_result_rows(&self, job_id: &str, rows: &[MatchPairDto]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut g = self.inner.lock();
+        match g.get_mut(job_id) {
+            Some(slot) => {
+                slot.rows.extend_from_slice(rows);
+                slot.summary.matches_found = slot.rows.len() as u64;
+                slot.last_accessed_unix_ms = now_ms();
+                if slot.persist_result_history
+                    && let Some(sqlite) = &self.sqlite
+                {
+                    sqlite.upsert_job_metadata(slot)?;
+                    sqlite.append_result_rows(&slot.summary.job_id, rows)?;
+                }
+                Ok(())
+            }
+            None => bail!("Unknown job id: {}", job_id),
+        }
+    }
+
     pub fn set_person_snapshots(
         &self,
         job_id: &str,
@@ -574,35 +600,12 @@ impl SqliteStore {
     fn save_job(&self, job: &StoredJob) -> Result<()> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT OR REPLACE INTO jobs(job_id, summary_json, allow_birthdate_swap, state, algorithm, started_at_unix_ms, finished_at_unix_ms, matches_found) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                job.summary.job_id,
-                serde_json::to_string(&job.summary)?,
-                if job.allow_birthdate_swap { 1_i64 } else { 0_i64 },
-                serde_json::to_string(&job.summary.state)?,
-                serde_json::to_string(&job.summary.algorithm)?,
-                job.summary.started_at_unix_ms as i64,
-                job.summary.finished_at_unix_ms.map(|v| v as i64),
-                job.summary.matches_found as i64,
-            ],
-        )?;
+        upsert_job_metadata_tx(&tx, job)?;
         tx.execute(
             "DELETE FROM results WHERE job_id = ?1",
             params![job.summary.job_id],
         )?;
-        for row in &job.rows {
-            tx.execute(
-                "INSERT INTO results(job_id, row_id, confidence, matched_at_level, row_json) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    job.summary.job_id,
-                    row.row_id as i64,
-                    row.confidence,
-                    row.matched_at_level.map(i64::from),
-                    serde_json::to_string(row)?,
-                ],
-            )?;
-        }
+        insert_result_rows_tx(&tx, &job.summary.job_id, &job.rows)?;
         tx.execute(
             "DELETE FROM result_person_lookup WHERE job_id = ?1",
             params![job.summary.job_id],
@@ -624,6 +627,22 @@ impl SqliteStore {
                 )?;
             }
         }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn upsert_job_metadata(&self, job: &StoredJob) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        upsert_job_metadata_tx(&tx, job)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn append_result_rows(&self, job_id: &str, rows: &[MatchPairDto]) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        insert_result_rows_tx(&tx, job_id, rows)?;
         tx.commit()?;
         Ok(())
     }
@@ -755,6 +774,43 @@ impl SqliteStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+fn upsert_job_metadata_tx(tx: &rusqlite::Transaction<'_>, job: &StoredJob) -> Result<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO jobs(job_id, summary_json, allow_birthdate_swap, state, algorithm, started_at_unix_ms, finished_at_unix_ms, matches_found) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            job.summary.job_id,
+            serde_json::to_string(&job.summary)?,
+            if job.allow_birthdate_swap { 1_i64 } else { 0_i64 },
+            serde_json::to_string(&job.summary.state)?,
+            serde_json::to_string(&job.summary.algorithm)?,
+            job.summary.started_at_unix_ms as i64,
+            job.summary.finished_at_unix_ms.map(|v| v as i64),
+            job.summary.matches_found as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_result_rows_tx(
+    tx: &rusqlite::Transaction<'_>,
+    job_id: &str,
+    rows: &[MatchPairDto],
+) -> Result<()> {
+    for row in rows {
+        tx.execute(
+            "INSERT OR REPLACE INTO results(job_id, row_id, confidence, matched_at_level, row_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                job_id,
+                row.row_id as i64,
+                row.confidence,
+                row.matched_at_level.map(i64::from),
+                serde_json::to_string(row)?,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_jobs_schema(conn: &Connection) -> Result<()> {

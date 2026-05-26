@@ -21,6 +21,7 @@ pub mod store;
 pub use dto::*;
 pub use sink::{ConsoleEventSink, EventSink, MultiEventSink, NullEventSink};
 pub use store::{ResultStore, ResultStoreConfig, StoredJob};
+use crate::perf::StageTimer;
 
 /// Runtime CUDA probe used by the Tauri `cuda_diagnostics` command and by
 /// the legacy egui GPU section. Returns populated `CudaDiagnosticsDto`
@@ -464,8 +465,8 @@ fn run_worker(
             "Starting job {} with algorithm {:?} on {} → {}",
             &job_id[..8],
             config.algorithm,
-            config.source.table,
-            config.target.table
+            selection_label(&config.source),
+            selection_label(&config.target)
         ),
     });
 
@@ -478,6 +479,7 @@ fn run_worker(
         JobStateDto::Running,
     );
     sink.emit_progress_with_stage(&job_id, PipelineStageDto::Load, 0, 100, "loading tables");
+    let load_timer = StageTimer::start("run_service_table_load");
     let load_result = (loader)(&config.source, &config.target, &cancel, sink_ref);
     if cancel.is_cancelled() {
         sink.emit_log(LogEntryDto {
@@ -508,6 +510,7 @@ fn run_worker(
             return;
         }
     };
+    load_timer.finish();
     sink.emit_log(LogEntryDto {
         job_id: job_id.clone(),
         timestamp_ms: now_ms(),
@@ -521,6 +524,7 @@ fn run_worker(
         ),
     });
     if config.options.persist_result_history {
+        let snapshot_timer = StageTimer::start("result_person_snapshot_save");
         if let Err(e) = store
             .set_person_snapshots(&job_id, t1.clone(), t2.clone())
             .context("person snapshot store write")
@@ -534,6 +538,7 @@ fn run_worker(
             );
             return;
         }
+        snapshot_timer.finish();
     } else {
         sink.emit_log(LogEntryDto {
             job_id: job_id.clone(),
@@ -612,6 +617,23 @@ fn run_worker(
         &job_id,
         JobStateDto::Running,
     );
+    sink.emit_log(LogEntryDto {
+        job_id: job_id.clone(),
+        timestamp_ms: now_ms(),
+        level: LogLevelDto::Info,
+        message: format!(
+            "Starting match engine for {} source rows and {} target rows",
+            t1.len(),
+            t2.len()
+        ),
+    });
+    sink.emit_progress_with_stage(
+        &job_id,
+        PipelineStageDto::Match,
+        0,
+        100,
+        "starting match engine",
+    );
     let engine_algo = config.algorithm.to_engine();
     let job_id_for_progress = job_id.clone();
     let sink_for_progress = Arc::clone(&sink);
@@ -663,6 +685,7 @@ fn run_worker(
             compute_backend: backend,
             gpu_device_id: None,
             gpu_mem_budget_mb: config.gpu.vram_budget_mb.map(|mb| mb as u64),
+            write_level_csv: false,
         };
 
         // Throttled progress callback for cascade level transitions.
@@ -1034,6 +1057,7 @@ fn run_worker(
     total_matches.store(pairs.len() as u64, Ordering::Relaxed);
 
     // 4) Persist into result store.
+    let dto_timer = StageTimer::start("dto_conversion");
     let dtos: Vec<MatchPairDto> = pairs
         .iter()
         .enumerate()
@@ -1086,8 +1110,14 @@ fn run_worker(
                 .map(|level| crate::matching::cascade::level_description(level).replace(':', " -")),
         })
         .collect();
+    dto_timer.finish();
     let count = dtos.len() as u64;
-    if let Err(e) = store.set_rows(&job_id, dtos).context("result store write") {
+    let rows_timer = StageTimer::start("result_rows_save");
+    if let Err(e) = store
+        .clear_rows(&job_id)
+        .and_then(|_| store.append_result_rows(&job_id, &dtos))
+        .context("result store write")
+    {
         fail_state(
             &state,
             sink_ref,
@@ -1097,6 +1127,7 @@ fn run_worker(
         );
         return;
     }
+    rows_timer.finish();
     sink.emit_log(LogEntryDto {
         job_id: job_id.clone(),
         timestamp_ms: now_ms(),

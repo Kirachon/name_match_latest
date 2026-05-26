@@ -116,7 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked --bin gui
+      - run: cargo build --release --locked --features gui --bin gui
       - uses: actions/upload-artifact@v4
         with:
           name: gui-windows-cpu
@@ -129,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked --bin gui
+      - run: cargo build --release --locked --features gui --bin gui
       - uses: actions/upload-artifact@v4
         with:
           name: gui-linux-cpu
@@ -144,7 +144,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify nvcc
         run: nvcc --version
-      - run: cargo build --release --locked --features gpu --bin gui
+      - run: cargo build --release --locked --features gui,gpu --bin gui
       - uses: actions/upload-artifact@v4
         with:
           name: gui-windows-gpu

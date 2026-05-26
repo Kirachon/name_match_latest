@@ -3088,6 +3088,7 @@ impl GuiApp {
                             compute_backend: cascade_compute_backend,
                             gpu_device_id: None,
                             gpu_mem_budget_mb: None,
+                            write_level_csv: true,
                         };
 
                         // Run cascade with progress reporting

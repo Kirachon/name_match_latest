@@ -46,6 +46,7 @@ mod metrics;
 mod models;
 mod normalize;
 mod optimization;
+mod perf;
 mod util;
 
 mod cli;
@@ -725,6 +726,7 @@ async fn run(app_cfg_opt: Option<crate::config::AppConfig>) -> Result<()> {
             compute_backend: crate::matching::ComputeBackend::Cpu,
             gpu_device_id: None,
             gpu_mem_budget_mb: None,
+            write_level_csv: true,
         };
 
         // Run cascade

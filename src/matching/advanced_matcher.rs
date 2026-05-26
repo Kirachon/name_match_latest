@@ -190,6 +190,31 @@ fn make_pair(
     }
 }
 
+fn fuzzy_birthdate_block_limit() -> Option<usize> {
+    std::env::var("NAME_MATCHER_MAX_FUZZY_BIRTHDATE_BLOCK")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+}
+
+fn fuzzy_block_within_limit(level: AdvLevel, key: &str, candidate_count: usize) -> bool {
+    let Some(limit) = fuzzy_birthdate_block_limit() else {
+        return true;
+    };
+    if candidate_count <= limit {
+        return true;
+    }
+
+    log::warn!(
+        "fuzzy_birthdate_block_skipped level={:?} key={} candidates={} limit={}",
+        level,
+        key,
+        candidate_count,
+        limit
+    );
+    false
+}
+
 fn exact_matched_fields(level: AdvLevel) -> Vec<String> {
     let mut fields = vec!["first_name".to_string(), "last_name".to_string()];
     match level {
@@ -304,6 +329,9 @@ pub fn advanced_match_inmemory(
 
                     for key in birthdate_keys(bd_a, allow_swap) {
                         if let Some(v2) = by_bd2.get(&key) {
+                            if !fuzzy_block_within_limit(cfg.level, &key, v2.len()) {
+                                continue;
+                            }
                             for &j in v2 {
                                 let b = &table2[j];
                                 if !seen_inner.insert(b.id) {
@@ -404,6 +432,9 @@ pub fn advanced_match_inmemory(
 
                     for key in birthdate_keys(bd_a, allow_swap) {
                         if let Some(v2) = by_bd2.get(&key) {
+                            if !fuzzy_block_within_limit(cfg.level, &key, v2.len()) {
+                                continue;
+                            }
                             for &j in v2 {
                                 let b = &table2[j];
                                 if !seen_inner.insert(b.id) {
@@ -701,6 +732,13 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     fn p(
         id: i64,
         f: &str,
@@ -784,6 +822,7 @@ mod tests {
 
     #[test]
     fn fuzzy_birthdate_swap_allowed_l10() {
+        let _guard = env_lock().lock().expect("env test lock poisoned");
         unsafe {
             std::env::set_var("NAME_MATCHER_ALLOW_BIRTHDATE_SWAP", "1");
         }
@@ -804,6 +843,7 @@ mod tests {
 
     #[test]
     fn fuzzy_birthdate_swap_ignored_l11() {
+        let _guard = env_lock().lock().expect("env test lock poisoned");
         unsafe {
             std::env::set_var("NAME_MATCHER_ALLOW_BIRTHDATE_SWAP", "1");
         }
@@ -819,6 +859,51 @@ mod tests {
         assert_eq!(r.len(), 0);
         unsafe {
             std::env::set_var("NAME_MATCHER_ALLOW_BIRTHDATE_SWAP", "0");
+        }
+    }
+
+    #[test]
+    fn fuzzy_birthdate_block_limit_skips_oversized_l10_block() {
+        let _guard = env_lock().lock().expect("env test lock poisoned");
+        unsafe {
+            std::env::set_var("NAME_MATCHER_MAX_FUZZY_BIRTHDATE_BLOCK", "1");
+        }
+        let a = vec![p(1, "Jon", Some("Ann"), "Smith", (1990, 1, 1), "", "")];
+        let b = vec![
+            p(2, "John", Some("Ann"), "Smith", (1990, 1, 1), "", ""),
+            p(3, "Jon", Some("Ann"), "Smith", (1990, 1, 1), "", ""),
+        ];
+        let cfg = AdvConfig {
+            level: AdvLevel::L10FuzzyBirthdateFullMiddle,
+            threshold: 0.80,
+            cols: AdvColumns::default(),
+            allow_birthdate_swap: false,
+        };
+        let r = advanced_match_inmemory(&a, &b, &cfg);
+        assert_eq!(r.len(), 0);
+        unsafe {
+            std::env::remove_var("NAME_MATCHER_MAX_FUZZY_BIRTHDATE_BLOCK");
+        }
+    }
+
+    #[test]
+    fn fuzzy_birthdate_block_limit_allows_normal_l11_block() {
+        let _guard = env_lock().lock().expect("env test lock poisoned");
+        unsafe {
+            std::env::set_var("NAME_MATCHER_MAX_FUZZY_BIRTHDATE_BLOCK", "2");
+        }
+        let a = vec![p(1, "Jon", None, "Smith", (1990, 1, 1), "", "")];
+        let b = vec![p(2, "John", None, "Smith", (1990, 1, 1), "", "")];
+        let cfg = AdvConfig {
+            level: AdvLevel::L11FuzzyBirthdateNoMiddle,
+            threshold: 0.80,
+            cols: AdvColumns::default(),
+            allow_birthdate_swap: false,
+        };
+        let r = advanced_match_inmemory(&a, &b, &cfg);
+        assert_eq!(r.len(), 1);
+        unsafe {
+            std::env::remove_var("NAME_MATCHER_MAX_FUZZY_BIRTHDATE_BLOCK");
         }
     }
 
