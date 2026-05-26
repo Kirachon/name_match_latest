@@ -252,13 +252,13 @@ The goal is not complete until this sequence either passes or a concrete blocker
 | Test | Rust lib, GPU lib, CPU release, GUI release, Tauri CPU/GPU release, UI lint/test/build all passed. | Passed |
 | Benchmark and speed results | `tmp/perf/results/loader-comparison.md` shows streaming loader p95 changes: small `-4.80%`, medium `-6.09%`, high-collision birthdate `-1.37%`, high-collision birth-year `-3.04%`, L10/L11 fuzzy-heavy `+1.45%` within gate. GPU canary GateOnly reduced CPU classification from 3 to 1 for L10/L11, with canary wall-time improvement from Shadow to GateOnly. | Passed for loader and GPU canary; broader GPU benchmark still gated |
 | GPU features work | `cuda_probe` built and ran on NVIDIA GeForce RTX 4050 Laptop GPU; GPU lib tests passed; Tauri GPU release build passed. `gpu_audit.exe` built but runtime audit was blocked by local MySQL access denied. | Partially Passed |
-| Auto review | Full and focused AI auto-review attempts were blocked by review-tool timeout/usage-limit errors. Deterministic validation and build/test gates passed, but AI review is not green. | Blocked |
-| Commit and push | Not completed. The worktree contains unrelated pre-existing/untracked import/UI/archive/image changes, so a safe commit requires explicit scoped-file approval. | Blocked |
+| Auto review | Full and focused AI auto-review attempts were blocked by review-tool timeout/usage-limit errors. Deterministic validation and build/test gates passed, but AI review is not green. A post-push retry against the current state was also blocked by the same usage limit. | Blocked by external review-tool limit |
+| Commit and push | Completed with scoped performance-remediation commit `ffba0da` pushed to `origin/main`. Unrelated pre-existing/untracked import/UI/archive/image changes were left unstaged. | Passed |
 
 ### Current Blockers
 
 1. **Auto-review blocker**: Context Engine review AI pass failed due timeout and then session usage limit. Do not treat it as clean.
-2. **Commit/push blocker**: Worktree contains unrelated changes outside the performance-remediation scope, including import UI/docs/assets/archive files. Commit must be scoped explicitly before push.
+2. **Unrelated worktree blocker**: Worktree still contains unrelated changes outside the performance-remediation scope, including import UI/docs/assets/archive files. These were intentionally excluded from the scoped commit.
 3. **T10/T12 blocker**: CSV import job architecture and true batch matching remain separate high-risk migrations requiring their own parity and lifecycle tests.
 4. **Broader GPU performance blocker**: GPU canaries prove functionality and parity, but broad GateOnly promotion still needs realistic benchmark/recall evidence.
 
