@@ -1,4 +1,4 @@
-<# 
+<#
 .SYNOPSIS
     Compare two benchmark JSON files and enforce default regression gates.
 #>

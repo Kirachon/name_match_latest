@@ -1,4 +1,4 @@
-<# 
+<#
 .SYNOPSIS
     Generate deterministic CSV datasets for name matcher performance baselines.
 

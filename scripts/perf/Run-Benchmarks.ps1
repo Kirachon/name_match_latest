@@ -1,4 +1,4 @@
-<# 
+<#
 .SYNOPSIS
     Run repeatable name matcher performance baselines and emit JSON evidence.
 

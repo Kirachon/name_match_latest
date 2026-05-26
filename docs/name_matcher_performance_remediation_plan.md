@@ -1707,51 +1707,51 @@ Repeatable performance reports exist before and after changes.
 
 ## Quick Wins First
 
-1. Instrumentation  
+1. Instrumentation
    Low risk, high clarity.
 
-2. GPU diagnostics  
+2. GPU diagnostics
    Low risk, avoids misleading test results.
 
-3. Move per-row CSV computations outside loops  
+3. Move per-row CSV computations outside loops
    Low risk, immediate CSV speedup.
 
-4. Disable cascade temp CSV output in Tauri  
+4. Disable cascade temp CSV output in Tauri
    Medium impact, low-to-medium risk.
 
-5. Avoid repeated result snapshot rewrites  
+5. Avoid repeated result snapshot rewrites
    High impact, moderate risk.
 
 ---
 
 ## Then Fix the Algorithmic Bottleneck
 
-6. Cap L10/L11 candidate generation  
+6. Cap L10/L11 candidate generation
    Highest matching speed impact.
 
-7. Replace birth-year fallback  
+7. Replace birth-year fallback
    High impact, recall-sensitive.
 
-8. Validate GPU Shadow mode  
+8. Validate GPU Shadow mode
    Needed before GPU gate becomes authoritative.
 
-9. Enable GateOnly after validation  
+9. Enable GateOnly after validation
    High impact if GPU gate reject rate is good.
 
 ---
 
 ## Then Deeper Architecture
 
-10. Streaming CSV loader  
+10. Streaming CSV loader
     High impact, moderate complexity.
 
-11. Real background CSV import  
+11. Real background CSV import
     High impact, moderate-to-high complexity.
 
-12. Staging-table import flow  
+12. Staging-table import flow
     High impact, higher complexity.
 
-13. True batch/streaming matching  
+13. True batch/streaming matching
     Highest architecture complexity. Do after easier wins.
 
 ---

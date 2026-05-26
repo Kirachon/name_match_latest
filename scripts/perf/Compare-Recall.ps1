@@ -1,4 +1,4 @@
-<# 
+<#
 .SYNOPSIS
     Compare two match-output JSON files for recall/parity regressions.
 
