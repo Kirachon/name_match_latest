@@ -267,7 +267,7 @@ impl GpuBatchAccumulator {
         t2: &[Person],
         ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
-        _stream2: &Arc<CudaStream>,
+        stream2: &Arc<CudaStream>,
         func: &CudaFunction,
         func_jaro: &CudaFunction,
         func_jw: &CudaFunction,
@@ -330,22 +330,22 @@ impl GpuBatchAccumulator {
         );
         if use_pinned {
             let pinned_setup = (|| -> Result<()> {
-                if self.pinned_a_bytes.as_ref().map(|b| b.len()) != Some(a_total) {
+                if self.pinned_a_bytes.as_ref().map_or(true, |b| b.len() < a_total) {
                     self.pinned_a_bytes = Some(unsafe { ctx.alloc_pinned::<u8>(a_total) }?);
                 }
-                if self.pinned_b_bytes.as_ref().map(|b| b.len()) != Some(b_total) {
+                if self.pinned_b_bytes.as_ref().map_or(true, |b| b.len() < b_total) {
                     self.pinned_b_bytes = Some(unsafe { ctx.alloc_pinned::<u8>(b_total) }?);
                 }
-                if self.pinned_a_offsets.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                if self.pinned_a_offsets.as_ref().map_or(true, |b| b.len() < n_pairs) {
                     self.pinned_a_offsets = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
-                if self.pinned_a_lengths.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                if self.pinned_a_lengths.as_ref().map_or(true, |b| b.len() < n_pairs) {
                     self.pinned_a_lengths = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
-                if self.pinned_b_offsets.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                if self.pinned_b_offsets.as_ref().map_or(true, |b| b.len() < n_pairs) {
                     self.pinned_b_offsets = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
-                if self.pinned_b_lengths.as_ref().map(|b| b.len()) != Some(n_pairs) {
+                if self.pinned_b_lengths.as_ref().map_or(true, |b| b.len() < n_pairs) {
                     self.pinned_b_lengths = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
 
@@ -457,14 +457,14 @@ impl GpuBatchAccumulator {
             }
         }
 
-        // Transfer arrays to GPU device memory.
+        // Transfer arrays to GPU device memory (split across two streams for H2D overlap).
         let h2d_start = Instant::now();
         let d_a = if use_pinned {
             let buf = self
                 .pinned_a_bytes
                 .as_ref()
                 .ok_or_else(|| anyhow!("Pinned a_bytes missing"))?;
-            stream.memcpy_stod(buf)?
+            stream.memcpy_stod(&buf.as_slice()?[..a_total])?
         } else {
             stream.memcpy_stod(a_bytes.as_slice())?
         };
@@ -473,7 +473,7 @@ impl GpuBatchAccumulator {
                 .pinned_a_offsets
                 .as_ref()
                 .ok_or_else(|| anyhow!("Pinned a_offsets missing"))?;
-            stream.memcpy_stod(buf)?
+            stream.memcpy_stod(&buf.as_slice()?[..n_pairs])?
         } else {
             stream.memcpy_stod(a_offsets.as_slice())?
         };
@@ -482,36 +482,37 @@ impl GpuBatchAccumulator {
                 .pinned_a_lengths
                 .as_ref()
                 .ok_or_else(|| anyhow!("Pinned a_lengths missing"))?;
-            stream.memcpy_stod(buf)?
+            stream.memcpy_stod(&buf.as_slice()?[..n_pairs])?
         } else {
             stream.memcpy_stod(a_lengths.as_slice())?
         };
+        // b_* buffers on stream2 for concurrent H2D transfer
         let d_b = if use_pinned {
             let buf = self
                 .pinned_b_bytes
                 .as_ref()
                 .ok_or_else(|| anyhow!("Pinned b_bytes missing"))?;
-            stream.memcpy_stod(buf)?
+            stream2.memcpy_stod(&buf.as_slice()?[..b_total])?
         } else {
-            stream.memcpy_stod(b_bytes.as_slice())?
+            stream2.memcpy_stod(b_bytes.as_slice())?
         };
         let d_b_off = if use_pinned {
             let buf = self
                 .pinned_b_offsets
                 .as_ref()
                 .ok_or_else(|| anyhow!("Pinned b_offsets missing"))?;
-            stream.memcpy_stod(buf)?
+            stream2.memcpy_stod(&buf.as_slice()?[..n_pairs])?
         } else {
-            stream.memcpy_stod(b_offsets.as_slice())?
+            stream2.memcpy_stod(b_offsets.as_slice())?
         };
         let d_b_len = if use_pinned {
             let buf = self
                 .pinned_b_lengths
                 .as_ref()
                 .ok_or_else(|| anyhow!("Pinned b_lengths missing"))?;
-            stream.memcpy_stod(buf)?
+            stream2.memcpy_stod(&buf.as_slice()?[..n_pairs])?
         } else {
-            stream.memcpy_stod(b_lengths.as_slice())?
+            stream2.memcpy_stod(b_lengths.as_slice())?
         };
         let d_mp_eq = if matches!(
             gate_mode,
@@ -521,6 +522,9 @@ impl GpuBatchAccumulator {
         } else {
             None
         };
+        // Sync both streams before kernel launch to ensure all H2D is complete.
+        stream.synchronize()?;
+        stream2.synchronize()?;
         stats.h2d_time_us += h2d_start.elapsed().as_micros();
 
         // [GPU_OPT1] Adaptive block size based on GPU architecture

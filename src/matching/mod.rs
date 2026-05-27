@@ -1988,11 +1988,11 @@ impl GpuFuzzyGateMode {
 
 impl Default for GpuFuzzyGateMode {
     fn default() -> Self {
-        Self::Off
+        Self::GateOnly
     }
 }
 
-static GPU_FUZZY_GATE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static GPU_FUZZY_GATE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
 
 #[inline]
 pub fn set_gpu_fuzzy_gate_mode(mode: GpuFuzzyGateMode) {
@@ -5563,6 +5563,8 @@ mod gpu {
         let total: usize = n1.len();
         // Cross-outer GPU batch (store pairs) to improve utilization by batching multiple outer records per launch
         let mut batch_pairs: Vec<(usize, usize)> = Vec::with_capacity(tile_max.max(1));
+        // Reusable accumulator — retains grow-only pinned buffers across tiles
+        let mut reusable_acc = crate::matching::gpu::batch::GpuBatchAccumulator::new(tile_max.max(1));
 
         // Track seen pairs to deduplicate when multiple lookup variants hit the same pair.
         let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
@@ -5673,12 +5675,11 @@ mod gpu {
                         // Flush in chunks with OOM backoff using prefix drains
                         let mut desired = tile_max.max(1);
                         while batch_pairs.len() >= desired {
-                            let mut inner_acc =
-                                crate::matching::gpu::batch::GpuBatchAccumulator::new(desired);
+                            reusable_acc.clear();
                             for &(oi, ij) in batch_pairs.iter().take(desired) {
-                                inner_acc.add_candidate(oi, ij);
+                                reusable_acc.add_candidate(oi, ij);
                             }
-                            let attempt = inner_acc.flush_to_gpu(
+                            let attempt = reusable_acc.flush_to_gpu(
                                 &n1,
                                 &n2,
                                 &cache1,
@@ -5752,11 +5753,11 @@ mod gpu {
         let mut desired = tile_max.max(1);
         while !batch_pairs.is_empty() {
             let actual_len = desired.min(batch_pairs.len());
-            let mut inner_acc = crate::matching::gpu::batch::GpuBatchAccumulator::new(actual_len);
+            reusable_acc.clear();
             for &(oi, ij) in batch_pairs.iter().take(actual_len) {
-                inner_acc.add_candidate(oi, ij);
+                reusable_acc.add_candidate(oi, ij);
             }
-            let attempt = inner_acc.flush_to_gpu(
+            let attempt = reusable_acc.flush_to_gpu(
                 &n1,
                 &n2,
                 &cache1,
