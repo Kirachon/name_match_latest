@@ -5,6 +5,7 @@
 
 mod commands;
 mod error;
+mod import_jobs;
 mod state;
 
 use crate::state::AppState;
@@ -62,6 +63,11 @@ fn main() {
             // File preview/import (B1/B2)
             commands::load_csv_preview,
             commands::load_excel_preview,
+            commands::preview_csv_import,
+            commands::validate_csv_import_plan,
+            commands::start_csv_import,
+            commands::get_csv_import_status,
+            commands::cancel_csv_import,
             // Matching lifecycle (T7)
             commands::start_matching,
             commands::cancel_matching,

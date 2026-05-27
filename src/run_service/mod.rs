@@ -15,13 +15,14 @@
 //!   shell wraps with throttling + `AppHandle::emit`.
 
 pub mod dto;
+pub mod scale;
 pub mod sink;
 pub mod store;
 
+use crate::perf::StageTimer;
 pub use dto::*;
 pub use sink::{ConsoleEventSink, EventSink, MultiEventSink, NullEventSink};
-pub use store::{ResultStore, ResultStoreConfig, StoredJob};
-use crate::perf::StageTimer;
+pub use store::{ExportRowFilter, ResultStore, ResultStoreConfig, StoredJob};
 
 /// Runtime CUDA probe used by the Tauri `cuda_diagnostics` command and by
 /// the legacy egui GPU section. Returns populated `CudaDiagnosticsDto`
@@ -303,6 +304,19 @@ pub type TableLoader = Arc<
         + Sync,
 >;
 
+/// Optional DB streaming runner used when scale policy selects streaming mode.
+pub type DbStreamRunner = Arc<
+    dyn Fn(
+            &RunConfigDto,
+            &str,
+            &CancelToken,
+            &dyn EventSink,
+            Arc<ResultStore>,
+        ) -> anyhow::Result<u64>
+        + Send
+        + Sync,
+>;
+
 impl RunService {
     /// Start a matching job. Returns a populated `JobHandle` immediately —
     /// matching runs on a dedicated OS thread.
@@ -312,6 +326,17 @@ impl RunService {
         store: Arc<ResultStore>,
         sink: Arc<dyn EventSink>,
         loader: TableLoader,
+    ) -> Arc<JobHandle> {
+        Self::start_with_streaming(config, registry, store, sink, loader, None)
+    }
+
+    pub fn start_with_streaming(
+        config: RunConfigDto,
+        registry: Arc<JobRegistry>,
+        store: Arc<ResultStore>,
+        sink: Arc<dyn EventSink>,
+        loader: TableLoader,
+        stream_runner: Option<DbStreamRunner>,
     ) -> Arc<JobHandle> {
         let job_id = uuid::Uuid::new_v4().to_string();
         let cancel = CancelToken::new();
@@ -341,6 +366,7 @@ impl RunService {
         let handle_id = job_id.clone();
         let handle_config = config.clone();
         let handle_loader = Arc::clone(&loader);
+        let handle_stream = stream_runner;
 
         let join = thread::Builder::new()
             .name(format!("nm-runner-{}", &job_id[..8]))
@@ -354,6 +380,7 @@ impl RunService {
                     handle_sink,
                     handle_store,
                     handle_loader,
+                    handle_stream,
                 );
             })
             .expect("failed to spawn run service worker thread");
@@ -448,8 +475,59 @@ fn run_worker(
     sink: Arc<dyn EventSink>,
     store: Arc<ResultStore>,
     loader: TableLoader,
+    stream_runner: Option<DbStreamRunner>,
 ) {
     let sink_ref: &dyn EventSink = sink.as_ref();
+    if let Some(runner) = stream_runner {
+        if scale::should_use_db_streaming_worker(&config) {
+            sink.emit_log(LogEntryDto {
+                job_id: job_id.clone(),
+                timestamp_ms: now_ms(),
+                level: LogLevelDto::Info,
+                message: "Effective mode: streaming (partitioned DB load)".into(),
+            });
+            let _ = store.enable_spill_mode(&job_id);
+            set_state(
+                &state,
+                sink_ref,
+                Some(store.as_ref()),
+                &job_id,
+                JobStateDto::Running,
+            );
+            match runner(&config, &job_id, &cancel, sink_ref, Arc::clone(&store)) {
+                Ok(matches) => {
+                    store.mark_finished(&job_id, matches, now_ms());
+                    set_state(
+                        &state,
+                        sink_ref,
+                        Some(store.as_ref()),
+                        &job_id,
+                        JobStateDto::Completed,
+                    );
+                }
+                Err(err) => {
+                    if err.to_string().contains("__name_match_cancelled__") {
+                        set_state(
+                            &state,
+                            sink_ref,
+                            Some(store.as_ref()),
+                            &job_id,
+                            JobStateDto::Cancelled,
+                        );
+                    } else {
+                        fail_state(
+                            &state,
+                            sink_ref,
+                            Some(store.as_ref()),
+                            &job_id,
+                            format!("Streaming match failed: {err}"),
+                        );
+                    }
+                }
+            }
+            return;
+        }
+    }
     set_state(
         &state,
         sink_ref,
@@ -1160,6 +1238,47 @@ fn run_worker(
         &job_id,
         JobStateDto::Completed,
     );
+}
+
+pub fn match_pair_to_dto(row_id: u64, p: &crate::matching::MatchPair) -> MatchPairDto {
+    MatchPairDto {
+        row_id,
+        source_id: p.person1.id,
+        source_uuid: p.person1.uuid.clone(),
+        source_full_name: full_name(&p.person1),
+        source_birthdate: p.person1.birthdate.map(|d| d.to_string()),
+        source_region_name: location_field(&p.person1, &["region_name", "region"]),
+        source_province_name: location_field(&p.person1, &["province_name", "province"]),
+        source_city_name: location_field(
+            &p.person1,
+            &["city_name", "city", "municipality_name", "municipality"],
+        ),
+        source_barangay_name: location_field(
+            &p.person1,
+            &["barangay_name", "barangay", "brgy_name", "brgy"],
+        ),
+        source_extra_fields: extra_fields_map(&p.person1),
+        target_id: p.person2.id,
+        target_uuid: p.person2.uuid.clone(),
+        target_full_name: full_name(&p.person2),
+        target_birthdate: p.person2.birthdate.map(|d| d.to_string()),
+        target_region_name: location_field(&p.person2, &["region_name", "region"]),
+        target_province_name: location_field(&p.person2, &["province_name", "province"]),
+        target_city_name: location_field(
+            &p.person2,
+            &["city_name", "city", "municipality_name", "municipality"],
+        ),
+        target_barangay_name: location_field(
+            &p.person2,
+            &["barangay_name", "barangay", "brgy_name", "brgy"],
+        ),
+        target_extra_fields: extra_fields_map(&p.person2),
+        confidence: p.confidence,
+        matched_fields: p.matched_fields.clone(),
+        matched_at_level: None,
+        match_method: None,
+        remarks: Some(match_remarks(p, None)),
+    }
 }
 
 fn full_name(p: &crate::models::Person) -> String {

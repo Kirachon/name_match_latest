@@ -20,6 +20,15 @@ import {
   type RunModeDto,
 } from "@/shared/tauri/types";
 import { cx, formatNumber } from "@/shared/lib/format";
+import {
+  maxSideRows,
+  resolveEffectiveRunMode,
+  rowCountForSide,
+  SCALE_WARN_ROWS,
+  scaleWarningLevel,
+  streamingBackendActive,
+} from "@/shared/runScalePolicy";
+import type { TableSelectionDto } from "@/shared/tauri/types";
 import { useToastStore } from "@/shared/stores/toastStore";
 import { CascadePicker } from "./CascadePicker";
 
@@ -372,12 +381,57 @@ export function GpuCard() {
 export function StreamingCard() {
   const s = useConfigStore((st) => st.streaming);
   const set = useConfigStore((st) => st.setStreaming);
+  const mode = useConfigStore((st) => st.mode);
+  const algorithm = useConfigStore((st) => st.algorithm);
+  const cascade = useConfigStore((st) => st.cascade);
+  const source = useConnectionStore((st) => st.source);
+  const target = useConnectionStore((st) => st.target);
+  const srcSel = connectionSelection(source);
+  const tgtSel = connectionSelection(target);
+  const srcRows = rowCountForSide(srcSel);
+  const tgtRows = rowCountForSide(tgtSel);
+  const effective = resolveEffectiveRunMode(s.mode, srcRows, tgtRows);
+  const backendActive = streamingBackendActive({
+    source: srcSel,
+    target: tgtSel,
+    streaming: s,
+    algorithm,
+    cascade: {
+      enabled: mode === "deep",
+      levels: cascade.levels,
+      fuzzy_threshold: cascade.fuzzy_threshold,
+      exclusion_mode: cascade.exclusion_mode,
+      has_barangay_code: false,
+      has_city_code: false,
+    },
+  });
+  const warn = scaleWarningLevel(Math.max(srcRows, tgtRows));
   return (
     <Card>
       <SectionHeader
         title="Streaming"
-        description="For large tables we stream rows in batches and write a checkpoint so the run can resume."
+        description="Requested mode is what you configure. Effective mode is what the backend will use for DB runs at scale."
       />
+      <div className="mb-3 rounded-md border border-ink-800 bg-ink-900/40 px-3 py-2 text-xs text-ink-300 space-y-1">
+        <p>
+          <span className="text-ink-400">Requested mode:</span> {s.mode}
+        </p>
+        <p>
+          <span className="text-ink-400">Effective mode:</span> {effective}
+          {backendActive
+            ? " (partitioned DB streaming active for algorithms 1–2)"
+            : effective === "streaming"
+              ? " (configured only — full streaming not active for this source/algorithm)"
+              : ""}
+        </p>
+        {warn !== "none" && (
+          <p className="text-amber-200/90">
+            {warn === "strong"
+              ? "500k+ rows per side: confirm before starting and prefer export for large result sets."
+              : "100k+ rows per side: streaming or import-to-DB is recommended."}
+          </p>
+        )}
+      </div>
       <div className="grid md:grid-cols-2 gap-3">
         <Field label="Mode">
           <div className="grid grid-cols-3 gap-1.5">
@@ -608,6 +662,14 @@ export function ExportCard() {
 export function PerformanceCard() {
   const opts = useConfigStore((s) => s.options);
   const set = useConfigStore((s) => s.setOptions);
+  const source = useConnectionStore((st) => st.source);
+  const target = useConnectionStore((st) => st.target);
+  const maxRows = maxSideRows({
+    source: connectionSelection(source),
+    target: connectionSelection(target),
+  });
+  const showPersistHistoryWarn =
+    opts.persist_result_history && maxRows >= SCALE_WARN_ROWS;
   return (
     <Card>
       <SectionHeader
@@ -640,6 +702,13 @@ export function PerformanceCard() {
           label="Persist result history"
           description="Stores person snapshots and results on disk for explanations, review decisions, restart recovery, and run diff. Leave off for faster matching start."
         />
+        {showPersistHistoryWarn && (
+          <p className="text-xs text-amber-200/90 -mt-2">
+            {maxRows >= 500_000
+              ? `${formatNumber(maxRows)}+ rows per side: persisting full result history uses substantial disk and slows startup. Prefer export for large result sets unless you need review/diff.`
+              : `${formatNumber(maxRows)}+ rows per side: result history persistence adds disk I/O at this scale. Consider leaving it off unless you need review or run diff.`}
+          </p>
+        )}
         <Field label="Rayon threads (manual override)">
           <input
             type="number"
@@ -739,7 +808,7 @@ export function SummaryCard({ onAdvance }: { onAdvance: () => void }) {
             value={
               source.mode === "file"
                 ? source.file.preview
-                  ? `${source.file.path} (${formatNumber(source.file.preview.total_preview_rows)} preview rows)`
+                  ? `${source.file.path} (preview only — ${formatNumber(source.file.preview.total_preview_rows)} rows shown)`
                   : "-"
                 : source.session && source.selectedTable
                   ? `${source.session.database}.${source.selectedTable}${
@@ -818,6 +887,34 @@ function isSideReady(
   return side.mode === "file"
     ? !!side.file.preview && !!side.columnMapping
     : !!side.session && !!side.selectedTable;
+}
+
+function connectionSelection(
+  side: ReturnType<typeof useConnectionStore.getState>["source"],
+): TableSelectionDto {
+  if (side.mode === "file") {
+    return {
+      source_kind: "file",
+      session_id: "",
+      table: "",
+      column_mapping: side.columnMapping,
+      row_count: side.file.preview?.total_preview_rows ?? null,
+      file: {
+        path: side.file.path,
+        sheet_name: side.file.sheetName,
+        encoding: side.file.encoding,
+        delimiter: side.file.delimiter,
+        date_format: side.file.dateFormat,
+      },
+    };
+  }
+  return {
+    source_kind: "database",
+    session_id: side.session!.session_id,
+    table: side.selectedTable!,
+    column_mapping: side.columnMapping,
+    row_count: side.rowCount,
+  };
 }
 
 function labelMode(m: ComputeModeDto) {

@@ -2243,12 +2243,38 @@ where
     F: Fn(ProgressUpdate) + Sync,
 {
     let start = Instant::now();
+    progress(ProgressUpdate {
+        processed: 0,
+        total: table1.len().max(1),
+        percent: 0.0,
+        eta_secs: 0,
+        mem_used_mb: memory_stats_mb().used_mb,
+        mem_avail_mb: memory_stats_mb().avail_mb,
+        stage: "normalizing",
+        batch_size_current: None,
+        gpu_total_mb: 0,
+        gpu_free_mb: 0,
+        gpu_active: false,
+    });
     let norm1: Vec<NormalizedPerson> = table1.par_iter().map(normalize_person).collect();
     let norm2: Vec<NormalizedPerson> = table2.par_iter().map(normalize_person).collect();
     let total = norm1.len();
     if total == 0 || norm2.is_empty() {
         return Vec::new();
     }
+    progress(ProgressUpdate {
+        processed: 0,
+        total,
+        percent: 0.0,
+        eta_secs: 0,
+        mem_used_mb: memory_stats_mb().used_mb,
+        mem_avail_mb: memory_stats_mb().avail_mb,
+        stage: "matching",
+        batch_size_current: None,
+        gpu_total_mb: 0,
+        gpu_free_mb: 0,
+        gpu_active: false,
+    });
     let threads = rayon::current_num_threads().max(1);
     let auto_batch = (total / (threads * 4)).clamp(100, 10_000).max(1);
     let batch_size = cfg.batch_size.unwrap_or(auto_batch);

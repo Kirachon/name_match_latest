@@ -5,7 +5,7 @@ use name_matcher::run_service::dto::{
     ExportRequestDto, ExportResultDto, ResultPageDto, ResultPageRequestDto, ReviewDecisionDto,
     SaveDecisionRequestDto, ScoreBreakdownDto,
 };
-use name_matcher::run_service::StoredJob;
+use name_matcher::run_service::{ExportRowFilter, ResultStore, StoredJob};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use tauri::State;
@@ -38,6 +38,22 @@ fn explain_pair_from_snapshot(
     snap: &StoredJob,
     request: &ExplainPairRequestDto,
 ) -> AppResult<ScoreBreakdownDto> {
+    if snap.source_people.is_empty() || snap.target_people.is_empty() {
+        return Ok(ScoreBreakdownDto {
+            supported: false,
+            algorithm: format!("{:?}", snap.summary.algorithm),
+            case_label: None,
+            confidence: None,
+            levenshtein_pct: None,
+            jaro_winkler_pct: None,
+            metaphone_pct: None,
+            birthdate_match: None,
+            birthdate_swap_used: false,
+            message: Some(
+                "Person snapshots are not available for this job (trimmed or not saved for large runs). Export or paging still includes match rows.".into(),
+            ),
+        });
+    }
     let source = snap
         .source_people
         .iter()
@@ -122,13 +138,10 @@ pub fn export_results(
     request: ExportRequestDto,
     state: State<'_, Arc<AppState>>,
 ) -> AppResult<ExportResultDto> {
-    let snap = state
+    let summary = state
         .results
-        .snapshot(&request.job_id)
+        .summary(&request.job_id)
         .ok_or_else(|| AppError::Validation(format!("unknown job_id: {}", request.job_id)))?;
-    if snap.rows.is_empty() {
-        return Err(AppError::Validation("No results to export".into()));
-    }
 
     std::fs::create_dir_all(&request.output_directory)
         .map_err(|e| AppError::Io(format!("create export dir: {e}")))?;
@@ -152,31 +165,117 @@ pub fn export_results(
         .filter(|decision| decision.decision == "rejected")
         .map(|decision| (decision.source_id, decision.target_id))
         .collect::<HashSet<_>>();
-    let rows = filter_export_rows(&snap.rows, min, &selected_levels, &rejected_pairs);
-    let row_count = rows.len() as u64;
-    let is_cascade = rows.iter().any(|r| r.matched_at_level.is_some());
+    let export_filter = ExportRowFilter {
+        min_confidence: min,
+        levels: &request.levels,
+        rejected_pairs: &rejected_pairs,
+    };
+    let is_cascade = state
+        .results
+        .export_has_cascade_levels(&request.job_id)
+        .map_err(|e| AppError::Validation(e.to_string()))?;
 
-    if matches!(request.format, ExportFormatDto::Csv | ExportFormatDto::Both) {
+    const CHUNK: usize = 5_000;
+    let want_csv = matches!(request.format, ExportFormatDto::Csv | ExportFormatDto::Both);
+    let want_xlsx = matches!(request.format, ExportFormatDto::Xlsx | ExportFormatDto::Both);
+    let extra_headers = if request.include_extra_fields {
+        collect_extra_field_headers(
+            state.results.as_ref(),
+            &request.job_id,
+            &export_filter,
+            CHUNK,
+        )
+        .map_err(|e| AppError::Validation(e.to_string()))?
+    } else {
+        Vec::new()
+    };
+
+    let mut csv_writer = if want_csv {
         let path = dir.join(format!("{stem}.csv"));
-        write_csv(&path, &rows, request.include_extra_fields)?;
+        let mut wtr =
+            csv::Writer::from_path(&path).map_err(|e| AppError::Io(format!("csv writer: {e}")))?;
+        write_csv_header(&mut wtr, is_cascade, &extra_headers)?;
+        Some((path, wtr))
+    } else {
+        None
+    };
+    let mut xlsx_rows = want_xlsx.then(Vec::new);
+    let mut levels_seen = BTreeSet::new();
+
+    let row_count = state
+        .results
+        .for_each_export_row(&request.job_id, &export_filter, CHUNK, |chunk| {
+            for row in chunk {
+                if let Some(level) = row.matched_at_level {
+                    if selected_levels.is_empty() || selected_levels.contains(&level) {
+                        levels_seen.insert(level);
+                    }
+                }
+            }
+            if let Some((_, wtr)) = csv_writer.as_mut() {
+                append_csv_rows(wtr, chunk, is_cascade, &extra_headers)?;
+            }
+            if let Some(buffer) = xlsx_rows.as_mut() {
+                buffer.extend(chunk.iter().map(|r| (*r).clone()));
+            }
+            Ok(())
+        })
+        .map_err(|e| AppError::Validation(e.to_string()))?;
+
+    if row_count == 0 {
+        return Err(AppError::Validation("No results to export".into()));
+    }
+
+    if let Some((path, mut wtr)) = csv_writer {
+        wtr.flush()
+            .map_err(|e| AppError::Io(format!("csv flush: {e}")))?;
         written.push(path.to_string_lossy().into_owned());
         if is_cascade {
-            for (level, level_rows) in group_rows_by_level(&rows) {
-                let path = dir.join(format!("{stem}_L{level:02}.csv"));
-                write_csv(&path, &level_rows, request.include_extra_fields)?;
-                written.push(path.to_string_lossy().into_owned());
+            for level in &levels_seen {
+                if !selected_levels.is_empty() && !selected_levels.contains(level) {
+                    continue;
+                }
+                let level_filter = ExportRowFilter {
+                    min_confidence: min,
+                    levels: std::slice::from_ref(level),
+                    rejected_pairs: &rejected_pairs,
+                };
+                let level_path = dir.join(format!("{stem}_L{level:02}.csv"));
+                let mut level_wtr = csv::Writer::from_path(&level_path)
+                    .map_err(|e| AppError::Io(format!("csv writer: {e}")))?;
+                let level_extra = if request.include_extra_fields {
+                    collect_extra_field_headers(
+                        state.results.as_ref(),
+                        &request.job_id,
+                        &level_filter,
+                        CHUNK,
+                    )
+                    .map_err(|e| AppError::Validation(e.to_string()))?
+                } else {
+                    Vec::new()
+                };
+                write_csv_header(&mut level_wtr, true, &level_extra)?;
+                state
+                    .results
+                    .for_each_export_row(&request.job_id, &level_filter, CHUNK, |chunk| {
+                        append_csv_rows(&mut level_wtr, chunk, true, &level_extra)?;
+                        Ok(())
+                    })
+                    .map_err(|e| AppError::Validation(e.to_string()))?;
+                level_wtr
+                    .flush()
+                    .map_err(|e| AppError::Io(format!("csv flush: {e}")))?;
+                written.push(level_path.to_string_lossy().into_owned());
             }
         }
     }
-    if matches!(
-        request.format,
-        ExportFormatDto::Xlsx | ExportFormatDto::Both
-    ) {
+    if let Some(rows) = xlsx_rows {
+        let refs: Vec<&name_matcher::run_service::dto::MatchPairDto> = rows.iter().collect();
         let path = dir.join(format!("{stem}.xlsx"));
         write_xlsx(
             &path,
-            &rows,
-            &snap.summary,
+            &refs,
+            &summary,
             is_cascade,
             request.include_extra_fields,
         )?;
@@ -250,6 +349,31 @@ fn validate_levels(levels: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+fn write_csv_header(
+    wtr: &mut csv::Writer<std::fs::File>,
+    is_cascade: bool,
+    extra_headers: &[ExtraFieldHeader],
+) -> AppResult<()> {
+    let headers = export_headers(is_cascade, extra_headers);
+    wtr.write_record(headers)
+        .map_err(|e| AppError::Io(format!("csv header: {e}")))?;
+    Ok(())
+}
+
+fn append_csv_rows(
+    wtr: &mut csv::Writer<std::fs::File>,
+    rows: &[name_matcher::run_service::dto::MatchPairDto],
+    is_cascade: bool,
+    extra_headers: &[ExtraFieldHeader],
+) -> AppResult<()> {
+    for r in rows {
+        let record = export_record(r, is_cascade, extra_headers);
+        wtr.write_record(record)
+            .map_err(|e| AppError::Io(format!("csv row: {e}")))?;
+    }
+    Ok(())
+}
+
 fn write_csv(
     path: &std::path::Path,
     rows: &[&name_matcher::run_service::dto::MatchPairDto],
@@ -259,17 +383,42 @@ fn write_csv(
         csv::Writer::from_path(path).map_err(|e| AppError::Io(format!("csv writer: {e}")))?;
     let is_cascade = rows.iter().any(|r| r.matched_at_level.is_some());
     let extra_headers = extra_field_headers(rows, include_extra_fields);
-    let headers = export_headers(is_cascade, &extra_headers);
-    wtr.write_record(headers)
-        .map_err(|e| AppError::Io(format!("csv header: {e}")))?;
-    for r in rows {
-        let record = export_record(r, is_cascade, &extra_headers);
-        wtr.write_record(record)
-            .map_err(|e| AppError::Io(format!("csv row: {e}")))?;
-    }
+    write_csv_header(&mut wtr, is_cascade, &extra_headers)?;
+    let owned: Vec<_> = rows.iter().map(|r| (*r).clone()).collect();
+    append_csv_rows(&mut wtr, &owned, is_cascade, &extra_headers)?;
     wtr.flush()
         .map_err(|e| AppError::Io(format!("csv flush: {e}")))?;
     Ok(())
+}
+
+fn collect_extra_field_headers(
+    store: &ResultStore,
+    job_id: &str,
+    filter: &ExportRowFilter<'_>,
+    chunk_size: usize,
+) -> Result<Vec<ExtraFieldHeader>, anyhow::Error> {
+    let mut source_keys = BTreeSet::new();
+    let mut target_keys = BTreeSet::new();
+    store.for_each_export_row(job_id, filter, chunk_size, |rows| {
+        for row in rows {
+            source_keys.extend(row.source_extra_fields.keys().cloned());
+            target_keys.extend(row.target_extra_fields.keys().cloned());
+        }
+        Ok(())
+    })?;
+    Ok(source_keys
+        .into_iter()
+        .map(|raw_name| ExtraFieldHeader {
+            export_name: format!("source_extra_{raw_name}"),
+            raw_name,
+            side: ExtraFieldSide::Source,
+        })
+        .chain(target_keys.into_iter().map(|raw_name| ExtraFieldHeader {
+            export_name: format!("target_extra_{raw_name}"),
+            raw_name,
+            side: ExtraFieldSide::Target,
+        }))
+        .collect())
 }
 
 fn write_xlsx(
@@ -539,6 +688,7 @@ mod tests {
             source_people: vec![person(1, (1990, 4, 12))],
             target_people: vec![person(2, (1990, 12, 4))],
             last_accessed_unix_ms: 0,
+            spilled: false,
         }
     }
 
@@ -629,6 +779,25 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].row_id, 1);
+    }
+
+    #[test]
+    fn explain_pair_reports_unavailable_when_snapshots_empty() {
+        let mut snap = explain_snapshot(true);
+        snap.source_people.clear();
+        snap.target_people.clear();
+        let request = ExplainPairRequestDto {
+            job_id: "job-test".into(),
+            source_id: 1,
+            target_id: 2,
+        };
+        let breakdown = explain_pair_from_snapshot(&snap, &request).unwrap();
+        assert!(!breakdown.supported);
+        assert!(breakdown
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("Person snapshots are not available"));
     }
 
     #[test]

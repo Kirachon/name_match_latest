@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppErrorDto,
   CudaDiagnosticsDto,
+  CsvImportDryRunResultDto,
+  CsvImportJobDto,
+  CsvImportRequestDto,
   CsvPreviewDto,
   CsvPreviewRequestDto,
   DbCredentialsDto,
@@ -83,6 +86,16 @@ export const loadCsvPreview = (request: CsvPreviewRequestDto) =>
   call<CsvPreviewDto>("load_csv_preview", { request });
 export const loadExcelPreview = (request: ExcelPreviewRequestDto) =>
   call<ExcelPreviewDto>("load_excel_preview", { request });
+export const previewCsvImport = (request: CsvImportRequestDto) =>
+  call<CsvPreviewDto>("preview_csv_import", { request });
+export const validateCsvImportPlan = (request: CsvImportRequestDto) =>
+  call<CsvImportDryRunResultDto>("validate_csv_import_plan", { request });
+export const startCsvImport = (request: CsvImportRequestDto) =>
+  call<CsvImportJobDto>("start_csv_import", { request });
+export const getCsvImportStatus = (jobId: string) =>
+  call<CsvImportJobDto>("get_csv_import_status", { jobId });
+export const cancelCsvImport = (jobId: string) =>
+  call<void>("cancel_csv_import", { jobId });
 
 // ---------- Matching ----------
 

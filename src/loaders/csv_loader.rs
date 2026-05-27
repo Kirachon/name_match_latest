@@ -109,7 +109,10 @@ impl CsvHeaderIndex {
     fn new(headers: &[String], mapping: &ColumnMapping) -> Self {
         Self {
             id: header_pos(headers, &mapping.id),
-            uuid: mapping.uuid.as_ref().and_then(|name| header_pos(headers, name)),
+            uuid: mapping
+                .uuid
+                .as_ref()
+                .and_then(|name| header_pos(headers, name)),
             first_name: header_pos(headers, &mapping.first_name),
             middle_name: mapping
                 .middle_name
@@ -117,7 +120,10 @@ impl CsvHeaderIndex {
                 .and_then(|name| header_pos(headers, name)),
             last_name: header_pos(headers, &mapping.last_name),
             birthdate: header_pos(headers, &mapping.birthdate),
-            hh_id: mapping.hh_id.as_ref().and_then(|name| header_pos(headers, name)),
+            hh_id: mapping
+                .hh_id
+                .as_ref()
+                .and_then(|name| header_pos(headers, name)),
         }
     }
 }
@@ -214,6 +220,155 @@ pub fn load_csv_people(
     load_csv_people_with_options(request, mapping, &CsvLoadOptions::default())
 }
 
+/// Stream CSV rows in batches without materializing the full file in memory.
+pub fn stream_csv_people_batches<F>(
+    request: &CsvPreviewRequestDto,
+    mapping: Option<&ColumnMapping>,
+    batch_size: usize,
+    options: &CsvLoadOptions,
+    mut on_batch: F,
+) -> Result<()>
+where
+    F: FnMut(&[Person]) -> Result<()>,
+{
+    let timer = StageTimer::start("csv_people_stream_batches");
+    let path = Path::new(&request.path);
+    if !path.is_file() {
+        bail!("CSV file not found: {}", request.path);
+    }
+    let batch_size = batch_size.max(1);
+    let (delimiter, input): (CsvDelimiterDto, Box<dyn Read>) =
+        if let (Some(encoding), Some(delimiter)) = (&request.encoding, &request.delimiter) {
+            if matches!(encoding, CsvEncodingDto::Utf8 | CsvEncodingDto::Utf8Bom) {
+                let file =
+                    File::open(path).with_context(|| format!("Failed to open {}", request.path))?;
+                (delimiter.clone(), Box::new(BufReader::new(file)))
+            } else {
+                let bytes = std::fs::read(path)
+                    .with_context(|| format!("Failed to read {}", request.path))?;
+                let text = decode_bytes(&bytes, encoding)?;
+                (delimiter.clone(), Box::new(Cursor::new(text.into_bytes())))
+            }
+        } else {
+            let bytes =
+                std::fs::read(path).with_context(|| format!("Failed to read {}", request.path))?;
+            let encoding = request
+                .encoding
+                .clone()
+                .unwrap_or_else(|| detect_encoding(&bytes));
+            let text = decode_bytes(&bytes, &encoding)?;
+            let delimiter = request
+                .delimiter
+                .clone()
+                .unwrap_or_else(|| detect_delimiter(&text));
+            (delimiter, Box::new(Cursor::new(text.into_bytes())))
+        };
+    let date_format = request
+        .date_format
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "%Y-%m-%d".to_string());
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter.byte())
+        .flexible(true)
+        .from_reader(input);
+    let headers = reader
+        .headers()
+        .context("CSV file has no readable header row")?
+        .iter()
+        .map(|v| v.trim().to_string())
+        .collect::<Vec<_>>();
+    validate_headers(&headers, &mut Vec::new())?;
+    let mapping = mapping.cloned().unwrap_or_else(|| infer_mapping(&headers));
+    if mapping.first_name.is_empty() || mapping.last_name.is_empty() || mapping.birthdate.is_empty()
+    {
+        bail!("CSV column mapping is missing first_name, last_name, or birthdate");
+    }
+    let header_index = CsvHeaderIndex::new(&headers, &mapping);
+    let mapped_columns = mapped_column_names(&mapping);
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut seen_ids = HashSet::new();
+    for (row_index, record) in reader.records().enumerate() {
+        if let Some(should_cancel) = &options.should_cancel {
+            if should_cancel() {
+                bail!("CSV load cancelled");
+            }
+        }
+        let record = record.context("Failed to parse CSV row")?;
+        let id = if options.generate_stable_ids {
+            stable_row_id_indexed(&headers, &record, &mapping, &header_index)
+        } else {
+            record
+                .get(
+                    header_index
+                        .id
+                        .context("CSV column mapping is missing id")?,
+                )
+                .map(|value| value.trim().parse::<i64>())
+                .transpose()
+                .context("Invalid CSV id")?
+                .context("CSV id value is empty")
+        }
+        .with_context(|| format!("Invalid CSV id on row {}", row_index + 2))?;
+        if !seen_ids.insert(id) {
+            bail!("Duplicate CSV stable id {} on row {}", id, row_index + 2);
+        }
+        let birthdate = value_at(&record, header_index.birthdate)
+            .filter(|v| !v.is_empty())
+            .map(|value| NaiveDate::parse_from_str(value, &date_format))
+            .transpose()
+            .with_context(|| format!("Invalid CSV birthdate for id {}", id))?;
+
+        let mut extra_fields = HashMap::new();
+        if options.include_extra_fields {
+            for (idx, header) in headers.iter().enumerate() {
+                if !mapped_columns.contains(header.as_str()) {
+                    if let Some(value) = value_at(&record, Some(idx)) {
+                        extra_fields.insert(header.clone(), value.to_string());
+                    }
+                }
+            }
+        }
+        batch.push(Person {
+            id,
+            uuid: mapping
+                .uuid
+                .as_ref()
+                .and_then(|_| value_at(&record, header_index.uuid))
+                .map(str::to_string),
+            first_name: value_at(&record, header_index.first_name).map(str::to_string),
+            middle_name: mapping
+                .middle_name
+                .as_ref()
+                .and_then(|_| value_at(&record, header_index.middle_name))
+                .map(str::to_string),
+            last_name: value_at(&record, header_index.last_name).map(str::to_string),
+            birthdate,
+            hh_id: mapping
+                .hh_id
+                .as_ref()
+                .and_then(|_| value_at(&record, header_index.hh_id))
+                .map(str::to_string),
+            extra_fields,
+        });
+        if batch.len() >= batch_size {
+            on_batch(&batch)?;
+            batch.clear();
+        }
+        if options.progress_interval_rows > 0
+            && (row_index + 1) % options.progress_interval_rows == 0
+            && let Some(on_progress_rows) = &options.on_progress_rows
+        {
+            on_progress_rows(row_index + 1);
+        }
+    }
+    if !batch.is_empty() {
+        on_batch(&batch)?;
+    }
+    timer.finish();
+    Ok(())
+}
+
 pub fn load_csv_people_with_options(
     request: &CsvPreviewRequestDto,
     mapping: Option<&ColumnMapping>,
@@ -292,13 +447,17 @@ pub fn load_csv_people_with_options(
             stable_row_id_indexed(&headers, &record, &mapping, &header_index)
         } else {
             record
-                .get(header_index.id.context("CSV column mapping is missing id")?)
+                .get(
+                    header_index
+                        .id
+                        .context("CSV column mapping is missing id")?,
+                )
                 .map(|value| value.trim().parse::<i64>())
                 .transpose()
                 .context("Invalid CSV id")?
                 .context("CSV id value is empty")
         }
-            .with_context(|| format!("Invalid CSV id on row {}", row_index + 2))?;
+        .with_context(|| format!("Invalid CSV id on row {}", row_index + 2))?;
         if !seen_ids.insert(id) {
             bail!("Duplicate CSV stable id {} on row {}", id, row_index + 2);
         }
@@ -340,7 +499,9 @@ pub fn load_csv_people_with_options(
                 .map(str::to_string),
             extra_fields,
         });
-        if options.progress_interval_rows > 0 && (row_index + 1) % options.progress_interval_rows == 0 {
+        if options.progress_interval_rows > 0
+            && (row_index + 1) % options.progress_interval_rows == 0
+        {
             if let Some(on_progress_rows) = &options.on_progress_rows {
                 on_progress_rows(row_index + 1);
             }

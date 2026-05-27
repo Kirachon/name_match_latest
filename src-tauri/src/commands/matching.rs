@@ -8,10 +8,14 @@ use name_matcher::loaders::csv_loader::{
 };
 use name_matcher::loaders::excel_loader::{load_excel_people, ExcelPreviewRequestDto};
 use name_matcher::models::Person;
+use name_matcher::matching::{PartitioningConfig, ProgressUpdate};
 use name_matcher::run_service::dto::{
-    DataSourceKindDto, JobStateDto, JobSummaryDto, RunConfigDto, TableSelectionDto,
+    DataSourceKindDto, JobStateDto, JobSummaryDto, PipelineStageDto, ProgressEventDto,
+    RunConfigDto, TableSelectionDto,
 };
-use name_matcher::run_service::{CancelToken, EventSink, RunService};
+use name_matcher::run_service::scale::{self, ScaleBlockReason};
+use name_matcher::run_service::{CancelToken, DbStreamRunner, EventSink, RunService};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::State;
 
@@ -43,6 +47,23 @@ pub async fn start_matching(
     validate_mapping_idents("target", config.target.column_mapping.as_ref())?;
     if config.export.output_directory.trim().is_empty() {
         return Err(AppError::Validation("output directory is required".into()));
+    }
+    if let Some(reason) = scale::scale_block_reason(&config) {
+        let msg = match reason {
+            ScaleBlockReason::MillionRowFileSource => {
+                "At 1M+ rows, import CSV to MySQL first; direct file matching is not supported."
+            }
+            ScaleBlockReason::MillionRowCascade => {
+                "Deep Match / cascade is in-memory only and is not supported for million-row runs."
+            }
+            ScaleBlockReason::MillionRowFuzzy => {
+                "Fuzzy matching at 1M+ rows is not supported in streaming mode; use deterministic algorithms or reduce row counts."
+            }
+            ScaleBlockReason::MillionRowUnsupportedAlgorithm => {
+                "This algorithm is not supported for million-row DB streaming runs."
+            }
+        };
+        return Err(AppError::Validation(msg.into()));
     }
 
     // Resolve DB sessions -> pools NOW so the worker thread does not need to
@@ -85,6 +106,8 @@ pub async fn start_matching(
     let sink: Arc<dyn EventSink> = Arc::new(TauriEventSink::new(state.app_handle.clone()));
     let registry = Arc::clone(&state.jobs);
     let store = Arc::clone(&state.results);
+    let src_pool_loader = src_pool.clone();
+    let src_pool_stream = src_pool.clone();
 
     // Loader closure runs on the worker thread. We block_on a private tokio
     // runtime just for the load step so we don't need a tokio handle from the
@@ -94,7 +117,7 @@ pub async fn start_matching(
               tgt: &TableSelectionDto,
               cancel: &CancelToken,
               _sink: &dyn EventSink| {
-            let src_pool = src_pool.clone();
+            let src_pool = src_pool_loader.clone();
             let tgt_pool = tgt_pool.clone();
             let src = src.clone();
             let tgt = tgt.clone();
@@ -113,7 +136,93 @@ pub async fn start_matching(
         },
     );
 
-    let handle = RunService::start(config, registry, store, sink, loader);
+    let stream_runner: Option<DbStreamRunner> =
+        if scale::should_use_db_streaming_worker(&config) {
+            let src = src_pool_stream.expect("source pool for streaming");
+            let job_sink = Arc::clone(&sink);
+            Some(Arc::new(
+                move |run_config: &RunConfigDto,
+                      job_id: &str,
+                      cancel: &CancelToken,
+                      _sink: &dyn EventSink,
+                      store: Arc<name_matcher::run_service::ResultStore>| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
+                    let algo = run_config.algorithm.to_engine();
+                    let scfg = scale::streaming_config_from_dto(&run_config.streaming);
+                    let strategy = run_config
+                        .streaming
+                        .partition_strategy
+                        .clone()
+                        .unwrap_or_else(|| "last_initial".to_string());
+                    let part_cfg = PartitioningConfig {
+                        strategy,
+                        enabled: true,
+                    };
+                    let next_row_id = AtomicU64::new(0);
+                    let job_id_owned = job_id.to_string();
+                    let cancel_flag = cancel.clone();
+                    let job_sink = Arc::clone(&job_sink);
+                    let progress_job_id = job_id.to_string();
+                    let matches_found = Arc::new(AtomicU64::new(0));
+                    let matches_found_progress = Arc::clone(&matches_found);
+                    let mut pending_rows = Vec::with_capacity(1_000);
+                    let count = rt.block_on(name_matcher::matching::stream_match_csv_partitioned(
+                        &src,
+                        &run_config.source.table,
+                        &run_config.target.table,
+                        algo,
+                        |pair| {
+                            if cancel_flag.is_cancelled() {
+                                anyhow::bail!("__name_match_cancelled__");
+                            }
+                            let row_id = next_row_id.fetch_add(1, Ordering::Relaxed);
+                            let dto = name_matcher::run_service::match_pair_to_dto(row_id, pair);
+                            pending_rows.push(dto);
+                            if pending_rows.len() >= 1_000 {
+                                store.append_result_rows(&job_id_owned, &pending_rows)?;
+                                pending_rows.clear();
+                            }
+                            matches_found.fetch_add(1, Ordering::Relaxed);
+                            Ok(())
+                        },
+                        scfg,
+                        move |u: ProgressUpdate| {
+                            job_sink.emit_progress(ProgressEventDto {
+                                job_id: progress_job_id.clone(),
+                                state: JobStateDto::Running,
+                                stage: PipelineStageDto::Match,
+                                processed: u.processed as u64,
+                                total: u.total as u64,
+                                percent: u.percent.clamp(0.0, 100.0),
+                                eta_secs: u.eta_secs,
+                                mem_used_mb: u.mem_used_mb,
+                                mem_avail_mb: u.mem_avail_mb,
+                                gpu_total_mb: u.gpu_total_mb,
+                                gpu_free_mb: u.gpu_free_mb,
+                                gpu_active: u.gpu_active,
+                                records_per_sec: 0.0,
+                                matches_found: matches_found_progress.load(Ordering::Relaxed),
+                            });
+                        },
+                        None,
+                        run_config.source.column_mapping.as_ref(),
+                        run_config.target.column_mapping.as_ref(),
+                        part_cfg,
+                    ))?;
+                    if !pending_rows.is_empty() {
+                        store.append_result_rows(&job_id_owned, &pending_rows)?;
+                    }
+                    Ok(count as u64)
+                },
+            ))
+        } else {
+            None
+        };
+
+    let handle = RunService::start_with_streaming(config, registry, store, sink, loader, stream_runner);
     Ok(handle.job_id.clone())
 }
 

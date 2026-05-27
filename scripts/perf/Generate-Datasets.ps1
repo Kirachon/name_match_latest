@@ -10,6 +10,7 @@ param(
   [int]$Seed = 424242,
   [int]$SmallRows = 1000,
   [int]$MediumRows = 100000,
+  [int]$GateRows = 250000,
   [int]$LargeRows = 1000000,
   [switch]$SkipLarge
 )
@@ -106,6 +107,7 @@ Write-Dataset -Name "high_collision_birthdate" -Rows $SmallRows -Profile "high_c
 Write-Dataset -Name "high_collision_birth_year" -Rows $SmallRows -Profile "high_collision_birth_year"
 Write-Dataset -Name "l10_l11_fuzzy_heavy" -Rows $SmallRows -Profile "l10_l11_fuzzy_heavy"
 Write-Dataset -Name "medium_csv_100k" -Rows $MediumRows -Profile "balanced"
+Write-Dataset -Name "gate_csv_250k" -Rows $GateRows -Profile "balanced"
 
 if (-not $SkipLarge) {
   Write-Dataset -Name "large_csv_1m" -Rows $LargeRows -Profile "balanced"

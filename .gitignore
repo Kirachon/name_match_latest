@@ -8,6 +8,8 @@
 .cargo/
 .cargo-temp/
 .cargo-home/
+.cargo-gpu-home/
+.cargo-test-home/
 .memories/
 
 # Local/generated run artifacts
@@ -21,6 +23,9 @@ summary_report_*.csv
 summary_report_*.xlsx
 repo_summary.json
 *.rar
+*.zip
+sample.png
+Screenshot*.png
 DOCUMENTATION.docx
 PRESENTATION.pptx
 

@@ -1,5 +1,10 @@
 import { z } from "zod";
-import type { RunConfigDto } from "./types";
+import type {
+  CsvImportDryRunResultDto,
+  CsvImportJobDto,
+  CsvImportRequestDto,
+  RunConfigDto,
+} from "./types";
 
 // ---------- Database credentials ----------
 
@@ -37,6 +42,150 @@ const FileSelectionSchema = z.object({
   delimiter: z.enum(["comma", "semicolon", "tab"]).nullable().optional(),
   date_format: z.string().nullable().optional(),
 });
+
+const CsvImportTargetSchema = z.object({
+  session_id: z.string().min(1, "Connect to a database first"),
+  database: z.string().min(1, "Database is required"),
+  table: z
+    .string()
+    .min(1, "Target table is required")
+    .regex(/^[A-Za-z0-9_$]+$/, "Use a safe table name"),
+  mode: z.enum(["create", "append", "replace"]),
+});
+
+const CsvImportPolicySchema = z
+  .object({
+    id_behavior: z.enum([
+      "use-csv-id",
+      "generate-id",
+      "db-auto-increment",
+      "use-csv-uuid",
+      "generate-uuid",
+    ]),
+    duplicate_behavior: z.enum(["skip", "update", "insert-anyway", "fail"]),
+    duplicate_key: z.enum(["id", "uuid", "matcher-fields"]),
+    batch_size: z.number().int().min(1).max(200_000),
+    create_indexes: z.boolean(),
+    confirmed_destructive: z.boolean(),
+  })
+  .superRefine((policy, ctx) => {
+    if (
+      policy.duplicate_behavior === "update" &&
+      policy.duplicate_key === "matcher-fields"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["duplicate_key"],
+        message: "Update duplicates requires ID or UUID as the duplicate key",
+      });
+    }
+  });
+
+const CsvImportDuplicateProbeStatusSchema = z.enum([
+  "complete",
+  "sampled",
+  "failed",
+  "blocked-needs-index",
+]);
+
+const CsvImportLoadMethodSchema = z.enum([
+  "batched-insert",
+  "load-data-infile",
+]);
+
+const CsvImportInvalidRowSchema = z.object({
+  row_number: z.number().int().min(1),
+  reason: z.string().min(1),
+});
+
+const CsvImportIndexPlanSchema = z.object({
+  name: z.string().min(1),
+  columns: z.array(z.string().min(1)),
+  unique: z.boolean(),
+});
+
+export const CsvImportDryRunResultSchema = z.object({
+  total_rows: z.number().int().min(0),
+  valid_rows: z.number().int().min(0),
+  invalid_rows: z.number().int().min(0),
+  duplicate_rows: z.number().int().min(0),
+  new_rows: z.number().int().min(0),
+  skipped_rows: z.number().int().min(0),
+  updated_rows: z.number().int().min(0),
+  estimated_batches: z.number().int().min(0),
+  table_exists: z.boolean(),
+  will_create_table: z.boolean(),
+  will_replace_table: z.boolean(),
+  warnings: z.array(z.string()),
+  invalid_samples: z.array(CsvImportInvalidRowSchema),
+  planned_columns: z.array(z.string()),
+  planned_indexes: z.array(CsvImportIndexPlanSchema),
+  plan_hash: z.string().min(1),
+  duplicate_probe_status: CsvImportDuplicateProbeStatusSchema.optional(),
+  staging_table: z.string().nullable().optional(),
+  load_method: CsvImportLoadMethodSchema.optional(),
+});
+
+export const CsvImportJobSchema = z.object({
+  job_id: z.string().min(1),
+  phase: z.enum([
+    "creating-table",
+    "importing",
+    "creating-indexes",
+    "validating",
+    "refreshing-source",
+    "complete",
+    "failed",
+    "cancelled",
+  ]),
+  total_rows: z.number().int().min(0),
+  processed_rows: z.number().int().min(0),
+  inserted_rows: z.number().int().min(0),
+  updated_rows: z.number().int().min(0),
+  skipped_rows: z.number().int().min(0),
+  failed_rows: z.number().int().min(0),
+  current_batch: z.number().int().min(0),
+  total_batches: z.number().int().min(0),
+  table: z.string().min(1),
+  message: z.string().nullable().optional(),
+  error: z.string().nullable().optional(),
+  dry_run: CsvImportDryRunResultSchema.nullable().optional(),
+  partial_commit: z.boolean().optional(),
+  destructive_step_completed: z.boolean().optional(),
+  staging_table: z.string().nullable().optional(),
+  load_method: CsvImportLoadMethodSchema.optional(),
+});
+
+export const CsvImportRequestSchema = z
+  .object({
+    target: CsvImportTargetSchema,
+    file: FileSelectionSchema,
+    mapping: ColumnMappingSchema,
+    policy: CsvImportPolicySchema,
+    plan_hash: z.string().min(1).nullable().optional(),
+  })
+  .superRefine((request, ctx) => {
+    if (
+      request.target.mode === "replace" &&
+      !request.policy.confirmed_destructive
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["policy", "confirmed_destructive"],
+        message: "Replace mode requires explicit confirmation",
+      });
+    }
+    if (
+      request.policy.id_behavior === "use-csv-id" &&
+      !request.mapping.id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["mapping", "id"],
+        message: "CSV ID mode requires an ID mapping",
+      });
+    }
+  });
 
 const TableSelectionSchema = z
   .object({
@@ -252,6 +401,51 @@ export function parseRunConfig(
 ): { ok: true; value: RunConfigDto } | { ok: false; issues: string[] } {
   const r = RunConfigSchema.safeParse(value);
   if (r.success) return { ok: true, value: r.data as RunConfigDto };
+  return {
+    ok: false,
+    issues: r.error.issues.map(
+      (i) => `${i.path.join(".") || "root"}: ${i.message}`,
+    ),
+  };
+}
+
+export function parseCsvImportRequest(
+  value: unknown,
+):
+  | { ok: true; value: CsvImportRequestDto }
+  | { ok: false; issues: string[] } {
+  const r = CsvImportRequestSchema.safeParse(value);
+  if (r.success) return { ok: true, value: r.data as CsvImportRequestDto };
+  return {
+    ok: false,
+    issues: r.error.issues.map(
+      (i) => `${i.path.join(".") || "root"}: ${i.message}`,
+    ),
+  };
+}
+
+export function parseCsvImportDryRunResult(
+  value: unknown,
+):
+  | { ok: true; value: CsvImportDryRunResultDto }
+  | { ok: false; issues: string[] } {
+  const r = CsvImportDryRunResultSchema.safeParse(value);
+  if (r.success) return { ok: true, value: r.data as CsvImportDryRunResultDto };
+  return {
+    ok: false,
+    issues: r.error.issues.map(
+      (i) => `${i.path.join(".") || "root"}: ${i.message}`,
+    ),
+  };
+}
+
+export function parseCsvImportJob(
+  value: unknown,
+):
+  | { ok: true; value: CsvImportJobDto }
+  | { ok: false; issues: string[] } {
+  const r = CsvImportJobSchema.safeParse(value);
+  if (r.success) return { ok: true, value: r.data as CsvImportJobDto };
   return {
     ok: false,
     issues: r.error.issues.map(

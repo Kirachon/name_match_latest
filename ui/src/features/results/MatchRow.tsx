@@ -87,11 +87,7 @@ export function MatchRow({
       >
         {row.matched_fields.join(", ")}
       </div>
-      <div
-        role="cell"
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
-      >
+      <div role="cell">
         <ReviewActions
           decision={decision}
           disabled={decisionSaving}

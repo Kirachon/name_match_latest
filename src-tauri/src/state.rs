@@ -1,4 +1,5 @@
 use crate::error::{AppError, AppResult};
+use crate::import_jobs::ImportJobRegistry;
 use name_matcher::run_service::dto::{
     DbCredentialsDto, DbSessionDto, JobStateEventDto, LogEntryDto, ProgressEventDto,
 };
@@ -72,6 +73,7 @@ impl DbRegistry {
 pub struct AppState {
     pub app_handle: AppHandle,
     pub db: DbRegistry,
+    pub import_jobs: Arc<ImportJobRegistry>,
     pub jobs: Arc<JobRegistry>,
     pub results: Arc<ResultStore>,
     pub started_at: Instant,
@@ -98,6 +100,7 @@ impl AppState {
         Self {
             app_handle,
             db: DbRegistry::default(),
+            import_jobs: Arc::new(ImportJobRegistry::default()),
             jobs: Arc::new(JobRegistry::default()),
             results: Arc::new(results),
             started_at: Instant::now(),

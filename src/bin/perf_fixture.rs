@@ -1,10 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use name_matcher::loaders::csv_loader::{
-    load_csv_people, load_csv_people_with_options, CsvDelimiterDto, CsvEncodingDto, CsvLoadOptions,
-    CsvPreviewRequestDto,
+    CsvDelimiterDto, CsvEncodingDto, CsvLoadOptions, CsvPreviewRequestDto, load_csv_people,
+    load_csv_people_with_options,
 };
 use name_matcher::matching::advanced_matcher::{
-    advanced_match_inmemory, AdvColumns, AdvConfig, AdvLevel,
+    AdvColumns, AdvConfig, AdvLevel, advanced_match_inmemory,
 };
 use serde::Serialize;
 use std::env;

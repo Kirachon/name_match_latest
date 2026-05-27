@@ -159,6 +159,192 @@ pub struct TableColumnsDto {
     pub raw_columns: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CsvImportTargetModeDto {
+    Create,
+    Append,
+    Replace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CsvImportIdBehaviorDto {
+    UseCsvId,
+    GenerateId,
+    DbAutoIncrement,
+    UseCsvUuid,
+    GenerateUuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CsvImportDuplicateBehaviorDto {
+    Skip,
+    Update,
+    InsertAnyway,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CsvImportDuplicateKeyDto {
+    Id,
+    Uuid,
+    MatcherFields,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CsvImportDuplicateProbeStatusDto {
+    #[default]
+    Complete,
+    Sampled,
+    Failed,
+    BlockedNeedsIndex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CsvImportLoadMethodDto {
+    #[default]
+    BatchedInsert,
+    LoadDataInfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvImportTargetDto {
+    pub session_id: String,
+    pub database: String,
+    pub table: String,
+    pub mode: CsvImportTargetModeDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvImportPolicyDto {
+    pub id_behavior: CsvImportIdBehaviorDto,
+    pub duplicate_behavior: CsvImportDuplicateBehaviorDto,
+    pub duplicate_key: CsvImportDuplicateKeyDto,
+    #[serde(default = "default_import_batch_size")]
+    pub batch_size: u32,
+    #[serde(default)]
+    pub create_indexes: bool,
+    #[serde(default)]
+    pub confirmed_destructive: bool,
+}
+
+fn default_import_batch_size() -> u32 {
+    5_000
+}
+
+impl Default for CsvImportPolicyDto {
+    fn default() -> Self {
+        Self {
+            id_behavior: CsvImportIdBehaviorDto::UseCsvId,
+            duplicate_behavior: CsvImportDuplicateBehaviorDto::Skip,
+            duplicate_key: CsvImportDuplicateKeyDto::Id,
+            batch_size: default_import_batch_size(),
+            create_indexes: true,
+            confirmed_destructive: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvImportRequestDto {
+    pub target: CsvImportTargetDto,
+    pub file: FileSelectionDto,
+    pub mapping: ColumnMappingDto,
+    #[serde(default)]
+    pub policy: CsvImportPolicyDto,
+    /// Set by the client after a successful dry-run; binds commit to that plan.
+    #[serde(default)]
+    pub plan_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvImportInvalidRowDto {
+    pub row_number: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvImportIndexPlanDto {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvImportDryRunResultDto {
+    pub total_rows: u64,
+    pub valid_rows: u64,
+    pub invalid_rows: u64,
+    pub duplicate_rows: u64,
+    pub new_rows: u64,
+    pub skipped_rows: u64,
+    pub updated_rows: u64,
+    pub estimated_batches: u64,
+    pub table_exists: bool,
+    pub will_create_table: bool,
+    pub will_replace_table: bool,
+    pub warnings: Vec<String>,
+    pub invalid_samples: Vec<CsvImportInvalidRowDto>,
+    pub planned_columns: Vec<String>,
+    pub planned_indexes: Vec<CsvImportIndexPlanDto>,
+    /// Fingerprint of the import request; required to start commit after dry-run.
+    #[serde(default)]
+    pub plan_hash: String,
+    #[serde(default)]
+    pub duplicate_probe_status: CsvImportDuplicateProbeStatusDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_table: Option<String>,
+    #[serde(default)]
+    pub load_method: CsvImportLoadMethodDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CsvImportJobPhaseDto {
+    CreatingTable,
+    Importing,
+    CreatingIndexes,
+    Validating,
+    RefreshingSource,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvImportJobDto {
+    pub job_id: String,
+    pub phase: CsvImportJobPhaseDto,
+    pub total_rows: u64,
+    pub processed_rows: u64,
+    pub inserted_rows: u64,
+    pub updated_rows: u64,
+    pub skipped_rows: u64,
+    pub failed_rows: u64,
+    pub current_batch: u64,
+    pub total_batches: u64,
+    pub table: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub dry_run: Option<CsvImportDryRunResultDto>,
+    #[serde(default)]
+    pub partial_commit: bool,
+    #[serde(default)]
+    pub destructive_step_completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_table: Option<String>,
+    #[serde(default)]
+    pub load_method: CsvImportLoadMethodDto,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DataSourceKindDto {
@@ -185,7 +371,7 @@ pub struct FileSelectionDto {
     pub date_format: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TableSelectionDto {
     #[serde(default)]
     pub source_kind: DataSourceKindDto,
@@ -197,6 +383,9 @@ pub struct TableSelectionDto {
     pub column_mapping: Option<ColumnMappingDto>,
     #[serde(default)]
     pub file: Option<FileSelectionDto>,
+    /// Populated by the UI after `get_row_count` for scale gating and auto streaming.
+    #[serde(default)]
+    pub row_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

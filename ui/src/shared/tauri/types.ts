@@ -75,12 +75,123 @@ export interface ColumnMappingDto {
   hh_id?: string | null;
 }
 
+export type CsvImportTargetModeDto = "create" | "append" | "replace";
+export type CsvImportIdBehaviorDto =
+  | "use-csv-id"
+  | "generate-id"
+  | "db-auto-increment"
+  | "use-csv-uuid"
+  | "generate-uuid";
+export type CsvImportDuplicateBehaviorDto =
+  | "skip"
+  | "update"
+  | "insert-anyway"
+  | "fail";
+export type CsvImportDuplicateKeyDto = "id" | "uuid" | "matcher-fields";
+export type CsvImportJobPhaseDto =
+  | "creating-table"
+  | "importing"
+  | "creating-indexes"
+  | "validating"
+  | "refreshing-source"
+  | "complete"
+  | "failed"
+  | "cancelled";
+
+export interface CsvImportTargetDto {
+  session_id: string;
+  database: string;
+  table: string;
+  mode: CsvImportTargetModeDto;
+}
+
+export interface CsvImportPolicyDto {
+  id_behavior: CsvImportIdBehaviorDto;
+  duplicate_behavior: CsvImportDuplicateBehaviorDto;
+  duplicate_key: CsvImportDuplicateKeyDto;
+  batch_size: number;
+  create_indexes: boolean;
+  confirmed_destructive: boolean;
+}
+
+export interface CsvImportRequestDto {
+  target: CsvImportTargetDto;
+  file: FileSelectionDto;
+  mapping: ColumnMappingDto;
+  policy: CsvImportPolicyDto;
+  /** Returned by dry-run; required when starting commit. */
+  plan_hash?: string | null;
+}
+
+export interface CsvImportInvalidRowDto {
+  row_number: number;
+  reason: string;
+}
+
+export interface CsvImportIndexPlanDto {
+  name: string;
+  columns: string[];
+  unique: boolean;
+}
+
+export type CsvImportDuplicateProbeStatusDto =
+  | "complete"
+  | "sampled"
+  | "failed"
+  | "blocked-needs-index";
+
+export type CsvImportLoadMethodDto = "batched-insert" | "load-data-infile";
+
+export interface CsvImportDryRunResultDto {
+  total_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
+  duplicate_rows: number;
+  new_rows: number;
+  skipped_rows: number;
+  updated_rows: number;
+  estimated_batches: number;
+  table_exists: boolean;
+  will_create_table: boolean;
+  will_replace_table: boolean;
+  warnings: string[];
+  invalid_samples: CsvImportInvalidRowDto[];
+  planned_columns: string[];
+  planned_indexes: CsvImportIndexPlanDto[];
+  plan_hash: string;
+  duplicate_probe_status?: CsvImportDuplicateProbeStatusDto;
+  staging_table?: string | null;
+  load_method?: CsvImportLoadMethodDto;
+}
+
+export interface CsvImportJobDto {
+  job_id: string;
+  phase: CsvImportJobPhaseDto;
+  total_rows: number;
+  processed_rows: number;
+  inserted_rows: number;
+  updated_rows: number;
+  skipped_rows: number;
+  failed_rows: number;
+  current_batch: number;
+  total_batches: number;
+  table: string;
+  message?: string | null;
+  error?: string | null;
+  dry_run?: CsvImportDryRunResultDto | null;
+  partial_commit?: boolean;
+  destructive_step_completed?: boolean;
+  staging_table?: string | null;
+  load_method?: CsvImportLoadMethodDto;
+}
+
 export interface TableSelectionDto {
   source_kind?: DataSourceKindDto;
   session_id: string;
   table: string;
   column_mapping?: ColumnMappingDto | null;
   file?: FileSelectionDto | null;
+  row_count?: number | null;
 }
 
 export interface CsvPreviewRequestDto {

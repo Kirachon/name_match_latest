@@ -164,6 +164,11 @@ pub async fn get_row_count(
 
 #[tauri::command]
 pub async fn disconnect_db(session_id: String, state: State<'_, Arc<AppState>>) -> AppResult<()> {
+    if state.import_jobs.session_has_active(&session_id) {
+        return Err(AppError::Validation(
+            "cannot disconnect while a CSV import is running for this session".into(),
+        ));
+    }
     if let Some(s) = state.db.remove(&session_id) {
         s.pool.close().await;
     }

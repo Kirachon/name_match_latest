@@ -123,8 +123,12 @@ foreach ($manifestPath in $manifests) {
     Replace("{dataset}", $manifest.name).
     Replace("{output}", $outDir)
 
+  $proc = Get-Process -Id $PID
+  $rssBeforeMb = [math]::Round($proc.WorkingSet64 / 1MB, 2)
+
   $datasetResult = [ordered]@{
     manifest = $manifest
+    peak_rss_mb = $null
     cold = Invoke-BenchmarkCommand -Command $commandBase -WorkingDirectory $repoRoot
     warm = @()
   }
@@ -132,6 +136,12 @@ foreach ($manifestPath in $manifests) {
   for ($i = 1; $i -le $RepeatCount; $i++) {
     $datasetResult.warm += Invoke-BenchmarkCommand -Command $commandBase -WorkingDirectory $repoRoot
   }
+
+  $proc.Refresh()
+  $datasetResult.peak_rss_mb = [math]::Max(
+    $rssBeforeMb,
+    [math]::Round($proc.WorkingSet64 / 1MB, 2)
+  )
 
   $elapsed = @($datasetResult.warm | ForEach-Object { $_.elapsed_ms } | Sort-Object)
   if ($elapsed.Count -gt 0) {

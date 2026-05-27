@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useCallback } from "react";
 import {
   cancelMatching,
   pauseMatching,
@@ -37,6 +37,12 @@ import type {
   PipelineStageDto,
   TableSelectionDto,
 } from "@/shared/tauri/types";
+import {
+  maxSideRows,
+  scaleBlockMessage,
+  scaleBlockReason,
+  scaleWarningLevel,
+} from "@/shared/runScalePolicy";
 
 const STAGES: Array<{ id: PipelineStageDto; label: string }> = [
   { id: "load", label: "Load" },
@@ -53,6 +59,39 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
   const setActive = useJobStore((s) => s.setActive);
   const progress = useProgressStore();
   const pushToast = useToastStore((s) => s.push);
+  const source = useConnectionStore((s) => s.source);
+  const target = useConnectionStore((s) => s.target);
+  const buildRunConfig = useConfigStore((s) => s.buildRunConfig);
+
+  const startGate = useMemo(() => {
+    const ready = readinessForRun({ source, target });
+    if (!ready.ready) {
+      return { disabled: true, title: ready.reason ?? "Open Connect tab" };
+    }
+    const srcRaw = source.columns?.raw_columns ?? [];
+    const tgtRaw = target.columns?.raw_columns ?? [];
+    const draft = buildRunConfig(
+      selectionFromSide(source),
+      selectionFromSide(target),
+      {
+        hasBarangay:
+          srcRaw.includes("barangay_code") && tgtRaw.includes("barangay_code"),
+        hasCity: srcRaw.includes("city_code") && tgtRaw.includes("city_code"),
+      },
+    );
+    const parsed = parseRunConfig(draft);
+    if (!parsed.ok) {
+      return {
+        disabled: true,
+        title: parsed.issues.slice(0, 2).join("; ") || "Configuration is invalid",
+      };
+    }
+    const block = scaleBlockReason(parsed.value);
+    if (block) {
+      return { disabled: true, title: scaleBlockMessage(block) };
+    }
+    return { disabled: false, title: undefined as string | undefined };
+  }, [source, target, buildRunConfig]);
 
   // Auto-advance to Results when run completes successfully.
   useEffect(() => {
@@ -62,13 +101,13 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
     }
   }, [jobState, onComplete]);
 
-  async function onStart() {
-    const ready = readinessForRun(useConnectionStore.getState());
-    if (!ready.ready) {
+  const onStart = useCallback(async () => {
+    if (startGate.disabled) {
       pushToast({
         tone: "warn",
-        title: "Not ready",
-        message: ready.reason ?? "Open Connect tab",
+        title: "Cannot start run",
+        message: startGate.title ?? "Complete configuration first",
+        ttlMs: null,
       });
       return;
     }
@@ -94,6 +133,13 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
       });
       return;
     }
+    const warn = scaleWarningLevel(maxSideRows(parsed.value));
+    if (warn === "strong") {
+      const ok = window.confirm(
+        `${maxSideRows(parsed.value).toLocaleString()}+ rows per side. This run may take a long time and produce a very large result set. Continue?`,
+      );
+      if (!ok) return;
+    }
     try {
       const id = await startMatching(parsed.value);
       setActive(id);
@@ -114,7 +160,7 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
         ttlMs: null,
       });
     }
-  }
+  }, [startGate, pushToast, setActive]);
 
   async function onCancel() {
     if (!activeJobId) return;
@@ -212,7 +258,12 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
             action={
               <div className="flex items-center gap-2">
                 {!isActive && (
-                  <Button tone="primary" onClick={onStart}>
+                  <Button
+                    tone="primary"
+                    onClick={onStart}
+                    disabled={startGate.disabled}
+                    title={startGate.title}
+                  >
                     {isTerminal ? "Run again" : "Start matching"}
                   </Button>
                 )}
@@ -346,6 +397,7 @@ function selectionFromSide(
       session_id: "",
       table: "",
       column_mapping: side.columnMapping,
+      row_count: side.file.preview?.total_preview_rows ?? null,
       file: {
         path: side.file.path,
         sheet_name: side.file.sheetName,
@@ -360,6 +412,7 @@ function selectionFromSide(
     session_id: side.session!.session_id,
     table: side.selectedTable!,
     column_mapping: side.columnMapping,
+    row_count: side.rowCount,
   };
 }
 

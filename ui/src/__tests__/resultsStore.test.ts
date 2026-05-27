@@ -6,7 +6,7 @@ import {
 
 describe("resultsStore", () => {
   beforeEach(() => {
-    localStorage.clear();
+    useResultsStore.persist.clearStorage();
     useResultsStore.setState({ jobs: {} });
   });
 

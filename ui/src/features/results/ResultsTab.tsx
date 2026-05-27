@@ -29,6 +29,7 @@ import {
   SectionHeader,
 } from "@/shared/components/primitives";
 import { formatDuration, formatNumber } from "@/shared/lib/format";
+import { LARGE_RESULTS_BANNER_ROWS } from "@/shared/runScalePolicy";
 import { JOB_STATE_TERMINAL } from "@/shared/tauri/types";
 import type {
   ExportFormatDto,
@@ -470,7 +471,7 @@ export function ResultsTab() {
               : "Loading run summary…"
           }
           action={
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap justify-end">
               <Button tone="secondary" onClick={() => onExport("csv")}>
                 Export CSV
               </Button>
@@ -499,6 +500,17 @@ export function ResultsTab() {
             </div>
           }
         />
+        {(page?.total ?? summary?.matches_found ?? 0) >=
+          LARGE_RESULTS_BANNER_ROWS && (
+          <div
+            className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+            role="status"
+          >
+            Large result set ({formatNumber(page?.total ?? summary?.matches_found ?? 0)}{" "}
+            rows). Paging is for review only — use Export above for the full dataset.
+            Match explanations may be unavailable when person snapshots were trimmed.
+          </div>
+        )}
         <div className="grid lg:grid-cols-4 gap-3">
           <Field label="Search">
             <input

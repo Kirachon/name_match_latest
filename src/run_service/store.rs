@@ -16,7 +16,7 @@ use crate::models::Person;
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,12 +40,21 @@ pub struct StoredJob {
     pub source_people: Vec<Person>,
     pub target_people: Vec<Person>,
     pub last_accessed_unix_ms: u64,
+    /// When true, match rows live in SQLite only (bounded RAM for million-row jobs).
+    pub spilled: bool,
 }
 
 pub struct ResultStore {
     inner: Mutex<HashMap<String, StoredJob>>,
     config: ResultStoreConfig,
     sqlite: Option<SqliteStore>,
+}
+
+/// Filters applied when exporting match rows (confidence, cascade levels, review rejections).
+pub struct ExportRowFilter<'a> {
+    pub min_confidence: f32,
+    pub levels: &'a [u8],
+    pub rejected_pairs: &'a HashSet<(i64, i64)>,
 }
 
 impl Default for ResultStore {
@@ -127,6 +136,7 @@ impl ResultStore {
                 source_people: Vec::new(),
                 target_people: Vec::new(),
                 last_accessed_unix_ms: started_at_unix_ms,
+                spilled: false,
             },
         );
         self.evict_terminal_locked(&mut g);
@@ -161,19 +171,55 @@ impl ResultStore {
         let mut g = self.inner.lock();
         match g.get_mut(job_id) {
             Some(slot) => {
-                slot.rows.extend_from_slice(rows);
-                slot.summary.matches_found = slot.rows.len() as u64;
-                slot.last_accessed_unix_ms = now_ms();
-                if slot.persist_result_history
-                    && let Some(sqlite) = &self.sqlite
-                {
+                if slot.spilled {
+                    slot.summary.matches_found =
+                        slot.summary.matches_found.saturating_add(rows.len() as u64);
+                    let sqlite = self
+                        .sqlite
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Spilled results require SQLite storage"))?;
                     sqlite.upsert_job_metadata(slot)?;
                     sqlite.append_result_rows(&slot.summary.job_id, rows)?;
+                } else if slot.rows.len() + rows.len() >= super::scale::RESULT_SPILL_ROWS {
+                    slot.summary.matches_found =
+                        slot.summary.matches_found.saturating_add(rows.len() as u64);
+                    if let Some(sqlite) = &self.sqlite {
+                        sqlite.upsert_job_metadata(slot)?;
+                        if !slot.rows.is_empty() {
+                            sqlite.append_result_rows(&slot.summary.job_id, &slot.rows)?;
+                            slot.rows.clear();
+                        }
+                        sqlite.append_result_rows(&slot.summary.job_id, rows)?;
+                        slot.spilled = true;
+                    } else {
+                        slot.rows.extend_from_slice(rows);
+                        slot.summary.matches_found = slot.rows.len() as u64;
+                    }
+                } else {
+                    slot.rows.extend_from_slice(rows);
+                    slot.summary.matches_found = slot.rows.len() as u64;
+                    if slot.persist_result_history
+                        && let Some(sqlite) = &self.sqlite
+                    {
+                        sqlite.upsert_job_metadata(slot)?;
+                        sqlite.append_result_rows(&slot.summary.job_id, rows)?;
+                    }
                 }
+                slot.last_accessed_unix_ms = now_ms();
                 Ok(())
             }
             None => bail!("Unknown job id: {}", job_id),
         }
+    }
+
+    pub fn enable_spill_mode(&self, job_id: &str) -> Result<()> {
+        let mut g = self.inner.lock();
+        let Some(slot) = g.get_mut(job_id) else {
+            bail!("Unknown job id: {}", job_id);
+        };
+        slot.spilled = true;
+        slot.rows.clear();
+        Ok(())
     }
 
     pub fn set_person_snapshots(
@@ -334,13 +380,129 @@ impl ResultStore {
         if request.base_job_id == request.compare_job_id {
             bail!("Choose two different jobs to compare");
         }
-        let base = self
-            .snapshot(&request.base_job_id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", request.base_job_id))?;
-        let compare = self
-            .snapshot(&request.compare_job_id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", request.compare_job_id))?;
-        Ok(diff_jobs(&base.rows, &compare.rows, request))
+        if self.summary(&request.base_job_id).is_none() {
+            bail!("Unknown job id: {}", request.base_job_id);
+        }
+        if self.summary(&request.compare_job_id).is_none() {
+            bail!("Unknown job id: {}", request.compare_job_id);
+        }
+        let base_rows = self.load_rows_for_diff(&request.base_job_id)?;
+        let compare_rows = self.load_rows_for_diff(&request.compare_job_id)?;
+        Ok(diff_jobs(&base_rows, &compare_rows, request))
+    }
+
+    /// Iterate exportable rows in bounded chunks without loading the full job into RAM.
+    /// Returns the number of rows delivered to the callback after filters.
+    pub fn for_each_export_row(
+        &self,
+        job_id: &str,
+        filter: &ExportRowFilter<'_>,
+        chunk_size: usize,
+        mut on_chunk: impl FnMut(&[MatchPairDto]) -> Result<()>,
+    ) -> Result<u64> {
+        validate_levels(filter.levels)?;
+        if self.summary(job_id).is_none() {
+            bail!("Unknown job id: {}", job_id);
+        }
+        let chunk_size = chunk_size.clamp(1, 10_000);
+        let mut total = 0u64;
+        let mut deliver = |rows: Vec<MatchPairDto>| -> Result<()> {
+            let filtered = filter_export_rows_in_memory(
+                &rows,
+                filter.min_confidence,
+                filter.levels,
+                filter.rejected_pairs,
+            );
+            if filtered.is_empty() {
+                return Ok(());
+            }
+            total += filtered.len() as u64;
+            let owned: Vec<MatchPairDto> = filtered.into_iter().cloned().collect();
+            on_chunk(&owned)
+        };
+
+        if self.job_rows_spilled(job_id)? {
+            let sqlite = self
+                .sqlite
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Spilled results require SQLite result storage"))?;
+            sqlite.for_each_result_rows(
+                job_id,
+                filter.min_confidence,
+                filter.levels,
+                chunk_size,
+                |chunk| deliver(chunk),
+            )?;
+        } else {
+            let rows = self.load_in_memory_rows(job_id)?;
+            for chunk in rows.chunks(chunk_size) {
+                deliver(chunk.to_vec())?;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Whether any exported rows would include cascade level metadata.
+    pub fn export_has_cascade_levels(&self, job_id: &str) -> Result<bool> {
+        if self.summary(job_id).is_none() {
+            bail!("Unknown job id: {}", job_id);
+        }
+        if self.job_rows_spilled(job_id)? {
+            let sqlite = self
+                .sqlite
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Spilled results require SQLite result storage"))?;
+            return sqlite.has_cascade_levels(job_id);
+        }
+        Ok(self
+            .load_in_memory_rows(job_id)?
+            .iter()
+            .any(|row| row.matched_at_level.is_some()))
+    }
+
+    fn job_rows_spilled(&self, job_id: &str) -> Result<bool> {
+        let g = self.inner.lock();
+        if let Some(slot) = g.get(job_id) {
+            return Ok(slot.spilled || job_rows_live_in_sqlite(slot));
+        }
+        drop(g);
+        if let Some(sqlite) = &self.sqlite {
+            if let Some(job) = sqlite.load_job(job_id)? {
+                return Ok(job.spilled || job_rows_live_in_sqlite(&job));
+            }
+        }
+        Ok(false)
+    }
+
+    fn load_in_memory_rows(&self, job_id: &str) -> Result<Vec<MatchPairDto>> {
+        let g = self.inner.lock();
+        if let Some(slot) = g.get(job_id) {
+            return Ok(slot.rows.clone());
+        }
+        drop(g);
+        if let Some(sqlite) = &self.sqlite {
+            if let Some(job) = sqlite.load_job(job_id)? {
+                if job.spilled || job_rows_live_in_sqlite(&job) {
+                    bail!("Spilled job rows are not available in memory");
+                }
+                return Ok(job.rows);
+            }
+        }
+        bail!("Unknown job id: {}", job_id)
+    }
+
+    fn load_rows_for_diff(&self, job_id: &str) -> Result<Vec<MatchPairDto>> {
+        let g = self.inner.lock();
+        if let Some(slot) = g.get(job_id) {
+            if !job_rows_live_in_sqlite(slot) {
+                return Ok(slot.rows.clone());
+            }
+        }
+        drop(g);
+        let sqlite = self.sqlite.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Diff for large spilled jobs requires SQLite storage")
+        })?;
+        sqlite.load_all_result_rows(job_id)
     }
 
     /// Implementation for the Tauri `get_results_page` command.
@@ -350,17 +512,27 @@ impl ResultStore {
         }
         validate_levels(&req.levels)?;
         let mut g = self.inner.lock();
+        let spilled = g.get(&req.job_id).map(|s| s.spilled).unwrap_or(false);
         let Some(slot) = g.get_mut(&req.job_id) else {
             drop(g);
-            let job = self
-                .sqlite
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", req.job_id))?
-                .load_job(&req.job_id)?
-                .ok_or_else(|| anyhow::anyhow!("Unknown job id: {}", req.job_id))?;
-            return page_from_rows(req, &job.rows);
+            if let Some(sqlite) = self.sqlite.as_ref() {
+                if let Some(job) = sqlite.load_job(&req.job_id)? {
+                    if job.spilled || job.rows.len() >= super::scale::RESULT_SPILL_ROWS {
+                        return sqlite.page_results(req);
+                    }
+                    return page_from_rows(req, &job.rows);
+                }
+            }
+            bail!("Unknown job id: {}", req.job_id);
         };
         slot.last_accessed_unix_ms = now_ms();
+        if slot.spilled || spilled {
+            let sqlite = self
+                .sqlite
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Spilled results require SQLite storage"))?;
+            return sqlite.page_results(req);
+        }
         page_from_rows(req, &slot.rows)
     }
 
@@ -535,6 +707,29 @@ fn pair_key(row: &MatchPairDto) -> (i64, i64) {
     (row.source_id, row.target_id)
 }
 
+fn job_rows_live_in_sqlite(job: &StoredJob) -> bool {
+    job.spilled || (job.rows.is_empty() && job.summary.matches_found > 0)
+}
+
+fn filter_export_rows_in_memory<'a>(
+    rows: &'a [MatchPairDto],
+    min_confidence: f32,
+    levels: &[u8],
+    rejected_pairs: &HashSet<(i64, i64)>,
+) -> Vec<&'a MatchPairDto> {
+    let selected_levels: BTreeSet<u8> = levels.iter().copied().collect();
+    rows.iter()
+        .filter(|r| r.confidence >= min_confidence)
+        .filter(|r| !rejected_pairs.contains(&(r.source_id, r.target_id)))
+        .filter(|r| {
+            selected_levels.is_empty()
+                || r.matched_at_level
+                    .map(|level| selected_levels.contains(&level))
+                    .unwrap_or(false)
+        })
+        .collect()
+}
+
 struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -570,12 +765,16 @@ impl SqliteStore {
                 row_id INTEGER NOT NULL,
                 confidence REAL NOT NULL,
                 matched_at_level INTEGER,
+                source_name TEXT NOT NULL DEFAULT '',
+                target_name TEXT NOT NULL DEFAULT '',
                 row_json TEXT NOT NULL,
                 PRIMARY KEY (job_id, row_id),
                 FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_results_job_confidence ON results(job_id, confidence);
             CREATE INDEX IF NOT EXISTS idx_results_job_level ON results(job_id, matched_at_level);
+            CREATE INDEX IF NOT EXISTS idx_results_job_source_name ON results(job_id, source_name);
+            CREATE INDEX IF NOT EXISTS idx_results_job_target_name ON results(job_id, target_name);
             CREATE TABLE IF NOT EXISTS result_person_lookup (
                 job_id TEXT NOT NULL,
                 side TEXT NOT NULL,
@@ -590,6 +789,7 @@ impl SqliteStore {
             "#,
         )?;
         ensure_jobs_schema(&conn)?;
+        ensure_results_schema(&conn)?;
         ensure_person_lookup_schema(&conn)?;
         ensure_decisions_schema(&conn)?;
         Ok(Self {
@@ -598,6 +798,9 @@ impl SqliteStore {
     }
 
     fn save_job(&self, job: &StoredJob) -> Result<()> {
+        if job.spilled || job_rows_live_in_sqlite(job) {
+            return self.upsert_job_metadata(job);
+        }
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         upsert_job_metadata_tx(&tx, job)?;
@@ -704,15 +907,175 @@ impl SqliteStore {
                 .map(|json| serde_json::from_str(&json).map_err(Into::into))
                 .collect()
         };
+        let spilled = rows.len() >= super::scale::RESULT_SPILL_ROWS;
         Ok(Some(StoredJob {
             summary,
             allow_birthdate_swap,
             persist_result_history: true,
-            rows,
+            rows: if spilled { Vec::new() } else { rows },
             source_people: load_people("source")?,
             target_people: load_people("target")?,
             last_accessed_unix_ms: now_ms(),
+            spilled,
         }))
+    }
+
+    fn load_all_result_rows(&self, job_id: &str) -> Result<Vec<MatchPairDto>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT row_json FROM results WHERE job_id = ?1 ORDER BY row_id ASC")?;
+        stmt.query_map(params![job_id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .collect()
+    }
+
+    fn has_cascade_levels(&self, job_id: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM results WHERE job_id = ?1 AND matched_at_level IS NOT NULL LIMIT 1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
+    fn for_each_result_rows(
+        &self,
+        job_id: &str,
+        min_confidence: f32,
+        levels: &[u8],
+        chunk_size: usize,
+        mut on_chunk: impl FnMut(Vec<MatchPairDto>) -> Result<()>,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        let mut where_parts = vec!["job_id = ?1".to_string()];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(job_id.to_string())];
+        if min_confidence > 0.0 {
+            where_parts.push("confidence >= ?".to_string());
+            params.push(Box::new(min_confidence));
+        }
+        if !levels.is_empty() {
+            let placeholders = std::iter::repeat("?")
+                .take(levels.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            where_parts.push(format!("matched_at_level IN ({placeholders})"));
+            for level in levels {
+                params.push(Box::new(*level as i64));
+            }
+        }
+        let sql = format!(
+            "SELECT row_json FROM results WHERE {} ORDER BY row_id ASC",
+            where_parts.join(" AND ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(
+            params.iter().map(|p| p.as_ref()),
+        ))?;
+        let mut chunk = Vec::with_capacity(chunk_size);
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            let pair: MatchPairDto = serde_json::from_str(&json)?;
+            chunk.push(pair);
+            if chunk.len() >= chunk_size {
+                on_chunk(std::mem::take(&mut chunk))?;
+                chunk = Vec::with_capacity(chunk_size);
+            }
+        }
+        if !chunk.is_empty() {
+            on_chunk(chunk)?;
+        }
+        Ok(())
+    }
+
+    fn page_results(&self, req: &ResultPageRequestDto) -> Result<ResultPageDto> {
+        validate_levels(&req.levels)?;
+        let conn = self.conn.lock();
+        let mut where_parts = vec!["job_id = ?1".to_string()];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(req.job_id.clone())];
+        if let Some(min) = req.min_confidence {
+            where_parts.push("confidence >= ?".to_string());
+            params.push(Box::new(min));
+        }
+        if let Some(q) = req.query.as_deref().filter(|q| !q.trim().is_empty()) {
+            where_parts.push("row_json LIKE ?".to_string());
+            params.push(Box::new(format!("%{}%", q.trim())));
+        }
+        let base_where_sql = where_parts.join(" AND ");
+        let level_counts_sql = format!(
+            "SELECT matched_at_level, COUNT(*) FROM results WHERE {base_where_sql} AND matched_at_level IS NOT NULL GROUP BY matched_at_level ORDER BY matched_at_level ASC"
+        );
+        let mut level_counts = BTreeMap::new();
+        let mut level_stmt = conn.prepare(&level_counts_sql)?;
+        let level_rows = level_stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        for row in level_rows {
+            let (level, count) = row?;
+            if let Ok(level) = u8::try_from(level) {
+                level_counts.insert(level, count.max(0) as u64);
+            }
+        }
+        let available_levels = level_counts.keys().copied().collect();
+        if !req.levels.is_empty() {
+            let placeholders = std::iter::repeat("?")
+                .take(req.levels.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            where_parts.push(format!("matched_at_level IN ({placeholders})"));
+            for level in &req.levels {
+                params.push(Box::new(*level as i64));
+            }
+        }
+        let where_sql = where_parts.join(" AND ");
+        let count_sql = format!("SELECT COUNT(*) FROM results WHERE {where_sql}");
+        let total: i64 = conn.query_row(
+            &count_sql,
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| row.get(0),
+        )?;
+        let sort_col = match req.sort_by.as_deref() {
+            Some("confidence") => "confidence",
+            Some("source_name") => "source_name",
+            Some("target_name") => "target_name",
+            _ => "row_id",
+        };
+        let sort_dir = if req.sort_dir.as_deref() == Some("desc") {
+            "DESC"
+        } else {
+            "ASC"
+        };
+        let offset = (req.page as i64) * (req.limit as i64);
+        let data_sql = format!(
+            "SELECT row_json FROM results WHERE {where_sql} ORDER BY {sort_col} {sort_dir}, row_id ASC LIMIT ? OFFSET ?"
+        );
+        let mut data_params: Vec<Box<dyn rusqlite::types::ToSql>> = params;
+        data_params.push(Box::new(req.limit as i64));
+        data_params.push(Box::new(offset));
+        let mut stmt = conn.prepare(&data_sql)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(data_params.iter().map(|p| p.as_ref())),
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|json| serde_json::from_str::<MatchPairDto>(&json).map_err(anyhow::Error::from))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ResultPageDto {
+            job_id: req.job_id.clone(),
+            rows,
+            total: total.max(0) as u64,
+            page: req.page,
+            limit: req.limit,
+            available_levels,
+            level_counts,
+        })
     }
 
     fn delete_job(&self, job_id: &str) -> Result<()> {
@@ -778,7 +1141,16 @@ impl SqliteStore {
 
 fn upsert_job_metadata_tx(tx: &rusqlite::Transaction<'_>, job: &StoredJob) -> Result<()> {
     tx.execute(
-        "INSERT OR REPLACE INTO jobs(job_id, summary_json, allow_birthdate_swap, state, algorithm, started_at_unix_ms, finished_at_unix_ms, matches_found) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO jobs(job_id, summary_json, allow_birthdate_swap, state, algorithm, started_at_unix_ms, finished_at_unix_ms, matches_found)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(job_id) DO UPDATE SET
+            summary_json = excluded.summary_json,
+            allow_birthdate_swap = excluded.allow_birthdate_swap,
+            state = excluded.state,
+            algorithm = excluded.algorithm,
+            started_at_unix_ms = excluded.started_at_unix_ms,
+            finished_at_unix_ms = excluded.finished_at_unix_ms,
+            matches_found = excluded.matches_found",
         params![
             job.summary.job_id,
             serde_json::to_string(&job.summary)?,
@@ -800,12 +1172,14 @@ fn insert_result_rows_tx(
 ) -> Result<()> {
     for row in rows {
         tx.execute(
-            "INSERT OR REPLACE INTO results(job_id, row_id, confidence, matched_at_level, row_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO results(job_id, row_id, confidence, matched_at_level, source_name, target_name, row_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 job_id,
                 row.row_id as i64,
                 row.confidence,
                 row.matched_at_level.map(i64::from),
+                row.source_full_name,
+                row.target_full_name,
                 serde_json::to_string(row)?,
             ],
         )?;
@@ -827,6 +1201,34 @@ fn ensure_jobs_schema(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    Ok(())
+}
+
+fn ensure_results_schema(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(results)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "source_name") {
+        conn.execute(
+            "ALTER TABLE results ADD COLUMN source_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|column| column == "target_name") {
+        conn.execute(
+            "ALTER TABLE results ADD COLUMN target_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_results_job_source_name ON results(job_id, source_name)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_results_job_target_name ON results(job_id, target_name)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1156,6 +1558,55 @@ mod tests {
     }
 
     #[test]
+    fn spilled_sqlite_page_matches_in_memory_filters() {
+        let path = sqlite_path("spill_filters");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve(
+            "spill-filter".into(),
+            AlgorithmDto::Fuzzy,
+            "t1".into(),
+            "t2".into(),
+            0,
+        );
+        store.enable_spill_mode("spill-filter").unwrap();
+        let mut rows = vec![
+            mk_pair(0, 91.0, "Ana Ramos", "Bob Jones"),
+            mk_pair(1, 92.0, "Ana Santos", "Dan Park"),
+            mk_pair(2, 93.0, "Ana Cruz", "Frank White"),
+        ];
+        rows[0].matched_at_level = Some(1);
+        rows[1].matched_at_level = Some(2);
+        rows[2].matched_at_level = Some(2);
+        store.append_result_rows("spill-filter", &rows).unwrap();
+
+        let pg = store
+            .page(&ResultPageRequestDto {
+                job_id: "spill-filter".into(),
+                page: 0,
+                limit: 10,
+                min_confidence: None,
+                query: Some("ana".into()),
+                sort_by: Some("source_name".into()),
+                sort_dir: Some("asc".into()),
+                levels: vec![2],
+            })
+            .unwrap();
+
+        assert_eq!(pg.rows.len(), 2);
+        assert_eq!(
+            pg.rows
+                .iter()
+                .map(|row| row.source_full_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Ana Cruz", "Ana Santos"]
+        );
+        assert_eq!(pg.total, 2);
+        assert_eq!(pg.available_levels, vec![1, 2]);
+        assert_eq!(pg.level_counts.get(&1), Some(&1));
+        assert_eq!(pg.level_counts.get(&2), Some(&2));
+    }
+
+    #[test]
     fn eviction_skips_active_jobs() {
         let store = ResultStore::with_config(ResultStoreConfig { max_retained: 1 });
         store.reserve(
@@ -1327,6 +1778,129 @@ mod tests {
     }
 
     #[test]
+    fn for_each_export_row_exports_spilled_job_from_sqlite() {
+        let path = sqlite_path("export_spill");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve_with_options(
+            "spill-export".into(),
+            AlgorithmDto::DeterministicFnLnBd,
+            "t1".into(),
+            "t2".into(),
+            0,
+            false,
+            true,
+        );
+        let rows: Vec<MatchPairDto> = (0..crate::run_service::scale::RESULT_SPILL_ROWS + 5)
+            .map(|i| mk_pair(i as u64, 90.0, "a", "b"))
+            .collect();
+        let expected = rows.len() as u64;
+        store.append_result_rows("spill-export", &rows).unwrap();
+        store.mark_finished("spill-export", expected, 1);
+        let page = store
+            .page(&ResultPageRequestDto {
+                job_id: "spill-export".into(),
+                page: 0,
+                limit: 10,
+                min_confidence: None,
+                query: None,
+                sort_by: Some("row_id".into()),
+                sort_dir: Some("asc".into()),
+                levels: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(page.total, expected, "rows must survive mark_finished");
+
+        let rejected = HashSet::new();
+        let filter = ExportRowFilter {
+            min_confidence: 0.0,
+            levels: &[],
+            rejected_pairs: &rejected,
+        };
+        let mut seen = 0u64;
+        let exported = store
+            .for_each_export_row("spill-export", &filter, 2_000, |chunk| {
+                seen += chunk.len() as u64;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(exported, expected);
+        assert_eq!(seen, expected);
+        assert!(store.snapshot("spill-export").unwrap().rows.len() < rows.len());
+    }
+
+    #[test]
+    fn diff_loads_spilled_rows_from_sqlite() {
+        let path = sqlite_path("diff_spill");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        for job_id in ["base-spill", "compare-spill"] {
+            store.reserve_with_options(
+                job_id.into(),
+                AlgorithmDto::Fuzzy,
+                "source".into(),
+                "target".into(),
+                1,
+                false,
+                true,
+            );
+        }
+        let spill_rows: Vec<MatchPairDto> = (0..crate::run_service::scale::RESULT_SPILL_ROWS + 3)
+            .map(|i| mk_pair(i as u64, 90.0, "a", "b"))
+            .collect();
+        store.append_result_rows("base-spill", &spill_rows).unwrap();
+        let mut added_row = mk_pair(999, 95.0, "added", "target");
+        added_row.source_id = 9_000_000;
+        added_row.target_id = 9_000_001;
+        store
+            .append_result_rows("compare-spill", std::slice::from_ref(&added_row))
+            .unwrap();
+        store.mark_finished("base-spill", spill_rows.len() as u64, 2);
+        store.mark_finished("compare-spill", 1, 2);
+
+        let diff = store
+            .diff(&DiffJobsRequestDto {
+                base_job_id: "base-spill".into(),
+                compare_job_id: "compare-spill".into(),
+            })
+            .unwrap();
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].source_id, 9_000_000);
+        assert!(diff.removed.len() > 1_000);
+    }
+
+    #[test]
+    fn append_spills_to_sqlite_without_retaining_all_rows_in_memory() {
+        let path = sqlite_path("spill");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        store.reserve(
+            "spill".into(),
+            AlgorithmDto::DeterministicFnLnBd,
+            "t1".into(),
+            "t2".into(),
+            0,
+        );
+        let rows: Vec<MatchPairDto> = (0..crate::run_service::scale::RESULT_SPILL_ROWS + 10)
+            .map(|i| mk_pair(i as u64, 90.0, "a", "b"))
+            .collect();
+        store.append_result_rows("spill", &rows).unwrap();
+        let snapshot = store.snapshot("spill").unwrap();
+        assert!(snapshot.spilled);
+        assert!(snapshot.rows.len() < rows.len());
+        let page = store
+            .page(&ResultPageRequestDto {
+                job_id: "spill".into(),
+                page: 0,
+                limit: 25,
+                min_confidence: None,
+                query: None,
+                sort_by: Some("row_id".into()),
+                sort_dir: Some("asc".into()),
+                levels: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(page.total, rows.len() as u64);
+        assert_eq!(page.rows.len(), 25);
+    }
+
     fn page_beyond_total_returns_empty_rows_with_total() {
         let store = ResultStore::new();
         store.reserve(
