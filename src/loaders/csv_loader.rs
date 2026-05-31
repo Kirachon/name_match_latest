@@ -349,7 +349,7 @@ where
                 .as_ref()
                 .and_then(|_| value_at(&record, header_index.hh_id))
                 .map(str::to_string),
-            extra_fields,
+            extra_fields: extra_fields.into(),
         });
         if batch.len() >= batch_size {
             on_batch(&batch)?;
@@ -497,7 +497,7 @@ pub fn load_csv_people_with_options(
                 .as_ref()
                 .and_then(|_| value_at(&record, header_index.hh_id))
                 .map(str::to_string),
-            extra_fields,
+            extra_fields: extra_fields.into(),
         });
         if options.progress_interval_rows > 0
             && (row_index + 1) % options.progress_interval_rows == 0

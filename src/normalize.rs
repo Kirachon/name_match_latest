@@ -50,7 +50,7 @@ mod tests {
             last_name: Some("Łukasz".into()),
             birthdate: NaiveDate::from_ymd_opt(2000, 1, 2),
             hh_id: None,
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         };
         let n = normalize_person(&p);
         assert_eq!(n.first_name.as_deref(), Some("eva"));
