@@ -65,6 +65,19 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Build UI dist for Tauri compile-time checks
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
