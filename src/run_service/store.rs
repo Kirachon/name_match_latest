@@ -439,7 +439,7 @@ impl ResultStore {
                 filter.min_confidence,
                 filter.levels,
                 chunk_size,
-                |chunk| deliver(chunk),
+                deliver,
             )?;
         } else {
             let rows = self.load_in_memory_rows(job_id)?;
@@ -967,8 +967,7 @@ impl SqliteStore {
             params.push(Box::new(min_confidence));
         }
         if !levels.is_empty() {
-            let placeholders = std::iter::repeat("?")
-                .take(levels.len())
+            let placeholders = std::iter::repeat_n("?", levels.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             where_parts.push(format!("matched_at_level IN ({placeholders})"));
@@ -1033,8 +1032,7 @@ impl SqliteStore {
         }
         let available_levels = level_counts.keys().copied().collect();
         if !req.levels.is_empty() {
-            let placeholders = std::iter::repeat("?")
-                .take(req.levels.len())
+            let placeholders = std::iter::repeat_n("?", req.levels.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             where_parts.push(format!("matched_at_level IN ({placeholders})"));

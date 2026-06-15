@@ -206,10 +206,10 @@ pub fn export_results(
         .results
         .for_each_export_row(&request.job_id, &export_filter, CHUNK, |chunk| {
             for row in chunk {
-                if let Some(level) = row.matched_at_level {
-                    if selected_levels.is_empty() || selected_levels.contains(&level) {
-                        levels_seen.insert(level);
-                    }
+                if let Some(level) = row.matched_at_level
+                    && (selected_levels.is_empty() || selected_levels.contains(&level))
+                {
+                    levels_seen.insert(level);
                 }
             }
             if let Some((_, wtr)) = csv_writer.as_mut() {
@@ -684,9 +684,9 @@ mod tests {
             summary: summary(),
             allow_birthdate_swap,
             persist_result_history: true,
-            rows: Vec::new(),
-            source_people: vec![person(1, (1990, 4, 12))],
-            target_people: vec![person(2, (1990, 12, 4))],
+            rows: Arc::new(Vec::new()),
+            source_people: Arc::new(vec![person(1, (1990, 4, 12))]),
+            target_people: Arc::new(vec![person(2, (1990, 12, 4))]),
             last_accessed_unix_ms: 0,
             spilled: false,
         }
@@ -783,9 +783,12 @@ mod tests {
 
     #[test]
     fn explain_pair_reports_unavailable_when_snapshots_empty() {
-        let mut snap = explain_snapshot(true);
-        snap.source_people.clear();
-        snap.target_people.clear();
+        let snap = explain_snapshot(true);
+        let snap = StoredJob {
+            source_people: Arc::new(Vec::new()),
+            target_people: Arc::new(Vec::new()),
+            ..snap
+        };
         let request = ExplainPairRequestDto {
             job_id: "job-test".into(),
             source_id: 1,

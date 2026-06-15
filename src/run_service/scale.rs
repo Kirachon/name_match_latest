@@ -111,10 +111,11 @@ pub fn scale_block_reason(config: &RunConfigDto) -> Option<ScaleBlockReason> {
 pub fn streaming_config_from_dto(
     streaming: &StreamingOptionsDto,
 ) -> crate::matching::StreamingConfig {
-    let mut cfg = crate::matching::StreamingConfig::default();
-    cfg.batch_size = streaming.batch_size as i64;
-    cfg.resume = streaming.resume;
-    cfg
+    crate::matching::StreamingConfig {
+        batch_size: streaming.batch_size as i64,
+        resume: streaming.resume,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

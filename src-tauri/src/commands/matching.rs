@@ -336,12 +336,12 @@ fn validate_mapping_idents(
         ("hh_id", mapping.hh_id.as_deref()),
     ];
     for (field, value) in optional {
-        if let Some(value) = value {
-            if !is_safe_ident(value) {
-                return Err(AppError::Validation(format!(
-                    "{side} mapping field {field} contains unsafe characters: {value}"
-                )));
-            }
+        if let Some(value) = value
+            && !is_safe_ident(value)
+        {
+            return Err(AppError::Validation(format!(
+                "{side} mapping field {field} contains unsafe characters: {value}"
+            )));
         }
     }
     Ok(())
