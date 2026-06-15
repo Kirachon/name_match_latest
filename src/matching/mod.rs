@@ -5564,7 +5564,8 @@ mod gpu {
         // Cross-outer GPU batch (store pairs) to improve utilization by batching multiple outer records per launch
         let mut batch_pairs: Vec<(usize, usize)> = Vec::with_capacity(tile_max.max(1));
         // Reusable accumulator — retains grow-only pinned buffers across tiles
-        let mut reusable_acc = crate::matching::gpu::batch::GpuBatchAccumulator::new(tile_max.max(1));
+        let mut reusable_acc =
+            crate::matching::gpu::batch::GpuBatchAccumulator::new(tile_max.max(1));
 
         // Track seen pairs to deduplicate when multiple lookup variants hit the same pair.
         let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();

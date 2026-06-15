@@ -71,8 +71,12 @@ export function suggestColumnMapping(columns: string[]): ColumnMappingDto {
     uuid: pickColumn(columns, ["uuid"]) || null,
     first_name: pickColumn(columns, REQUIRED_MAPPING_FIELDS[1].hints),
     middle_name:
-      pickColumn(columns, ["middle_name", "middlename", "mname", "middle_initial"]) ||
-      null,
+      pickColumn(columns, [
+        "middle_name",
+        "middlename",
+        "mname",
+        "middle_initial",
+      ]) || null,
     last_name: pickColumn(columns, REQUIRED_MAPPING_FIELDS[2].hints),
     birthdate: pickColumn(columns, REQUIRED_MAPPING_FIELDS[3].hints),
     hh_id: pickColumn(columns, ["hh_id", "household_id"]) || null,
@@ -177,7 +181,6 @@ export function bothSidesHaveGeoColumn(
   hints: string[],
 ): boolean {
   return (
-    hasColumnAlias(sourceColumns, hints) &&
-    hasColumnAlias(targetColumns, hints)
+    hasColumnAlias(sourceColumns, hints) && hasColumnAlias(targetColumns, hints)
   );
 }

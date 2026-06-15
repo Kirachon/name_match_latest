@@ -7,7 +7,10 @@ import {
 } from "@/shared/runScalePolicy";
 import type { RunConfigDto } from "@/shared/tauri/types";
 
-function dbConfig(rows: number, algorithm: RunConfigDto["algorithm"]): RunConfigDto {
+function dbConfig(
+  rows: number,
+  algorithm: RunConfigDto["algorithm"],
+): RunConfigDto {
   const side = {
     source_kind: "database" as const,
     session_id: "s",

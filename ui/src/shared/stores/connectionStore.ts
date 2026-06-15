@@ -161,7 +161,9 @@ export const useConnectionStore = create<ConnectionStore>((set) => ({
     set(() => ({ source: { ...emptySide }, target: { ...emptySide } })),
 }));
 
-export function readinessForRun(state: Pick<ConnectionStore, "source" | "target">): {
+export function readinessForRun(
+  state: Pick<ConnectionStore, "source" | "target">,
+): {
   ready: boolean;
   reason: string | null;
 } {

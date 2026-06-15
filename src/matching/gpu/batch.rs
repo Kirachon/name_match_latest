@@ -330,22 +330,46 @@ impl GpuBatchAccumulator {
         );
         if use_pinned {
             let pinned_setup = (|| -> Result<()> {
-                if self.pinned_a_bytes.as_ref().map_or(true, |b| b.len() < a_total) {
+                if self
+                    .pinned_a_bytes
+                    .as_ref()
+                    .map_or(true, |b| b.len() < a_total)
+                {
                     self.pinned_a_bytes = Some(unsafe { ctx.alloc_pinned::<u8>(a_total) }?);
                 }
-                if self.pinned_b_bytes.as_ref().map_or(true, |b| b.len() < b_total) {
+                if self
+                    .pinned_b_bytes
+                    .as_ref()
+                    .map_or(true, |b| b.len() < b_total)
+                {
                     self.pinned_b_bytes = Some(unsafe { ctx.alloc_pinned::<u8>(b_total) }?);
                 }
-                if self.pinned_a_offsets.as_ref().map_or(true, |b| b.len() < n_pairs) {
+                if self
+                    .pinned_a_offsets
+                    .as_ref()
+                    .map_or(true, |b| b.len() < n_pairs)
+                {
                     self.pinned_a_offsets = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
-                if self.pinned_a_lengths.as_ref().map_or(true, |b| b.len() < n_pairs) {
+                if self
+                    .pinned_a_lengths
+                    .as_ref()
+                    .map_or(true, |b| b.len() < n_pairs)
+                {
                     self.pinned_a_lengths = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
-                if self.pinned_b_offsets.as_ref().map_or(true, |b| b.len() < n_pairs) {
+                if self
+                    .pinned_b_offsets
+                    .as_ref()
+                    .map_or(true, |b| b.len() < n_pairs)
+                {
                     self.pinned_b_offsets = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
-                if self.pinned_b_lengths.as_ref().map_or(true, |b| b.len() < n_pairs) {
+                if self
+                    .pinned_b_lengths
+                    .as_ref()
+                    .map_or(true, |b| b.len() < n_pairs)
+                {
                     self.pinned_b_lengths = Some(unsafe { ctx.alloc_pinned::<i32>(n_pairs) }?);
                 }
 

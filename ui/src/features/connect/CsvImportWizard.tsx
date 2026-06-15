@@ -31,7 +31,10 @@ import {
 } from "@/shared/components/primitives";
 import { ColumnMapper } from "./ColumnMapper";
 import { useCsvImportStore } from "./csvImportStore";
-import { loadPersistedConnection, savePersistedConnection } from "./persistence";
+import {
+  loadPersistedConnection,
+  savePersistedConnection,
+} from "./persistence";
 
 const ENCODINGS: Array<{ id: CsvEncodingDto | ""; label: string }> = [
   { id: "", label: "Auto" },
@@ -112,7 +115,11 @@ export function CsvImportWizard() {
       });
     } catch (err) {
       patch({ previewLoading: false, error: errMsg(err) });
-      pushToast({ tone: "error", title: "Preview failed", message: errMsg(err) });
+      pushToast({
+        tone: "error",
+        title: "Preview failed",
+        message: errMsg(err),
+      });
     }
   }
 
@@ -131,7 +138,11 @@ export function CsvImportWizard() {
       });
     } catch (err) {
       patch({ dryRunLoading: false, error: errMsg(err) });
-      pushToast({ tone: "error", title: "Dry run failed", message: errMsg(err) });
+      pushToast({
+        tone: "error",
+        title: "Dry run failed",
+        message: errMsg(err),
+      });
     }
   }
 
@@ -223,7 +234,11 @@ export function CsvImportWizard() {
         importStatus: "terminal",
         error: errMsg(err),
       });
-      pushToast({ tone: "error", title: "Import failed", message: errMsg(err) });
+      pushToast({
+        tone: "error",
+        title: "Import failed",
+        message: errMsg(err),
+      });
     }
   }
 
@@ -245,7 +260,11 @@ export function CsvImportWizard() {
       });
     } catch (err) {
       patch({ importStatus: "running" });
-      pushToast({ tone: "error", title: "Cancel failed", message: errMsg(err) });
+      pushToast({
+        tone: "error",
+        title: "Cancel failed",
+        message: errMsg(err),
+      });
     }
   }
 
@@ -334,7 +353,11 @@ export function CsvImportWizard() {
             title={`Import CSV to ${capitalize(wizard.side)} Database`}
             description="Create or update a MySQL table, then select it for matching."
           />
-          <Button tone="ghost" onClick={handleClose} disabled={wizard.importStatus === "cancelling"}>
+          <Button
+            tone="ghost"
+            onClick={handleClose}
+            disabled={wizard.importStatus === "cancelling"}
+          >
             Close
           </Button>
         </div>
@@ -425,7 +448,8 @@ export function CsvImportWizard() {
                   value={wizard.encoding ?? ""}
                   onChange={(e) =>
                     patch({
-                      encoding: (e.target.value || null) as CsvEncodingDto | null,
+                      encoding: (e.target.value ||
+                        null) as CsvEncodingDto | null,
                       preview: null,
                       dryRun: null,
                     })
@@ -444,7 +468,8 @@ export function CsvImportWizard() {
                   value={wizard.delimiter ?? ""}
                   onChange={(e) =>
                     patch({
-                      delimiter: (e.target.value || null) as CsvDelimiterDto | null,
+                      delimiter: (e.target.value ||
+                        null) as CsvDelimiterDto | null,
                       preview: null,
                       dryRun: null,
                     })
@@ -510,8 +535,8 @@ export function CsvImportWizard() {
                 value={wizard.duplicateBehavior}
                 onChange={(e) =>
                   patch({
-                    duplicateBehavior:
-                      e.target.value as typeof wizard.duplicateBehavior,
+                    duplicateBehavior: e.target
+                      .value as typeof wizard.duplicateBehavior,
                     dryRun: null,
                   })
                 }
@@ -555,7 +580,9 @@ export function CsvImportWizard() {
             </Field>
             <Toggle
               checked={wizard.createIndexes}
-              onChange={(createIndexes) => patch({ createIndexes, dryRun: null })}
+              onChange={(createIndexes) =>
+                patch({ createIndexes, dryRun: null })
+              }
               label="Create matching indexes after import"
             />
           </Card>
@@ -702,7 +729,11 @@ function DryRunSummary({
   );
 }
 
-function JobSummary({ job }: { job: NonNullable<ReturnType<typeof useCsvImportStore.getState>["job"]> }) {
+function JobSummary({
+  job,
+}: {
+  job: NonNullable<ReturnType<typeof useCsvImportStore.getState>["job"]>;
+}) {
   const batchPct =
     job.total_batches > 0
       ? Math.min(100, Math.round((job.current_batch / job.total_batches) * 100))
@@ -721,7 +752,10 @@ function JobSummary({ job }: { job: NonNullable<ReturnType<typeof useCsvImportSt
           : "info";
   return (
     <Card className="space-y-3">
-      <SectionHeader title="Import Progress" description={job.message ?? undefined} />
+      <SectionHeader
+        title="Import Progress"
+        description={job.message ?? undefined}
+      />
       <div className="grid sm:grid-cols-4 gap-2 text-sm">
         <Metric label="Processed" value={job.processed_rows} />
         <Metric label="Inserted" value={job.inserted_rows} />
@@ -743,7 +777,8 @@ function JobSummary({ job }: { job: NonNullable<ReturnType<typeof useCsvImportSt
       )}
       {job.total_rows > 0 && (
         <div className="text-2xs text-ink-500">
-          Rows {job.processed_rows.toLocaleString()} / {job.total_rows.toLocaleString()} ({rowPct}%)
+          Rows {job.processed_rows.toLocaleString()} /{" "}
+          {job.total_rows.toLocaleString()} ({rowPct}%)
         </div>
       )}
       <Pill tone={tone}>{job.phase}</Pill>
@@ -783,7 +818,9 @@ function JobSummary({ job }: { job: NonNullable<ReturnType<typeof useCsvImportSt
   );
 }
 
-function formatLoadMethod(method: "batched-insert" | "load-data-infile"): string {
+function formatLoadMethod(
+  method: "batched-insert" | "load-data-infile",
+): string {
   return method === "load-data-infile" ? "LOAD DATA INFILE" : "Batched INSERT";
 }
 
@@ -898,7 +935,9 @@ function isCsvPath(path: string): boolean {
 }
 
 function pick(headers: string[], hints: string[]): string {
-  const normalized = new Map(headers.map((header) => [normalize(header), header]));
+  const normalized = new Map(
+    headers.map((header) => [normalize(header), header]),
+  );
   for (const hint of hints) {
     const found = normalized.get(normalize(hint));
     if (found) return found;

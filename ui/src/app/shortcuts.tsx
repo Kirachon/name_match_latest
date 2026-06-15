@@ -137,11 +137,7 @@ async function triggerStart(
     selectionFromSide(connState.source),
     selectionFromSide(connState.target),
     {
-      hasBarangay: bothSidesHaveGeoColumn(
-        srcRaw,
-        tgtRaw,
-        BARANGAY_CODE_HINTS,
-      ),
+      hasBarangay: bothSidesHaveGeoColumn(srcRaw, tgtRaw, BARANGAY_CODE_HINTS),
       hasCity: bothSidesHaveGeoColumn(srcRaw, tgtRaw, CITY_CODE_HINTS),
     },
   );

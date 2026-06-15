@@ -115,7 +115,9 @@ export function ResultsTab() {
         setBaseJobId((current) => current || activeJobId);
         setCompareJobId((current) => {
           if (current && current !== activeJobId) return current;
-          return items.find((item) => item.job_id !== activeJobId)?.job_id ?? "";
+          return (
+            items.find((item) => item.job_id !== activeJobId)?.job_id ?? ""
+          );
         });
       })
       .catch(() => {});
@@ -303,10 +305,7 @@ export function ResultsTab() {
     patchView({ levels: next, pageIndex: 0 });
   }
 
-  async function onDecision(
-    row: MatchPairDto,
-    decision: ReviewDecisionValue,
-  ) {
+  async function onDecision(row: MatchPairDto, decision: ReviewDecisionValue) {
     if (!activeJobId) return;
     setSavingRows((current) => new Set(current).add(row.row_id));
     try {
@@ -340,7 +339,10 @@ export function ResultsTab() {
     const startIndex = selectedRow
       ? pageRows.findIndex((row) => row.row_id === selectedRow.row_id) + 1
       : 0;
-    const orderedRows = [...pageRows.slice(startIndex), ...pageRows.slice(0, startIndex)];
+    const orderedRows = [
+      ...pageRows.slice(startIndex),
+      ...pageRows.slice(0, startIndex),
+    ];
     const next = orderedRows.find((row) => {
       const decision = decisions[decisionKey(row)]?.decision;
       return (
@@ -506,9 +508,11 @@ export function ResultsTab() {
             className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
             role="status"
           >
-            Large result set ({formatNumber(page?.total ?? summary?.matches_found ?? 0)}{" "}
-            rows). Paging is for review only — use Export above for the full dataset.
-            Match explanations may be unavailable when person snapshots were trimmed.
+            Large result set (
+            {formatNumber(page?.total ?? summary?.matches_found ?? 0)} rows).
+            Paging is for review only — use Export above for the full dataset.
+            Match explanations may be unavailable when person snapshots were
+            trimmed.
           </div>
         )}
         <div className="grid lg:grid-cols-4 gap-3">

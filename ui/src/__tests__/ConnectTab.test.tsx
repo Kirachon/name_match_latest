@@ -22,7 +22,9 @@ describe("ConnectTab", () => {
   it("renders without triggering a recursive store update", () => {
     render(<ConnectTab onAdvance={vi.fn()} />);
 
-    expect(screen.getByRole("button", { name: "Continue to Configure" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Continue to Configure" }),
+    ).toBeDisabled();
     expect(screen.getByText("Source Database")).toBeInTheDocument();
     expect(screen.getByText("Target Database")).toBeInTheDocument();
   });

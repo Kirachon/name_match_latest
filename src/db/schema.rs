@@ -61,10 +61,16 @@ fn validate_ident(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn require_mapped_column(all_columns: &std::collections::HashSet<&str>, column: &str) -> Result<()> {
+fn require_mapped_column(
+    all_columns: &std::collections::HashSet<&str>,
+    column: &str,
+) -> Result<()> {
     validate_ident(column)?;
     if !all_columns.contains(column) {
-        bail!("Mapped column '{}' does not exist in the selected table", column);
+        bail!(
+            "Mapped column '{}' does not exist in the selected table",
+            column
+        );
     }
     Ok(())
 }
@@ -194,14 +200,10 @@ pub async fn get_all_table_columns(
     table: &str,
 ) -> Result<Vec<String>> {
     let rows = fetch_table_column_rows(pool, database, table).await?;
-    Ok(rows
-        .iter()
-        .filter_map(column_name_from_row)
-        .collect())
+    Ok(rows.iter().filter_map(column_name_from_row).collect())
 }
 
 pub async fn get_person_rows(pool: &MySqlPool, table: &str) -> Result<Vec<Person>> {
-
     validate_ident(table)?;
 
     // Get database name from pool connection string
@@ -325,7 +327,6 @@ pub async fn get_person_rows_with_all_columns(
     database: &str,
     table: &str,
 ) -> Result<Vec<Person>> {
-
     validate_ident(table)?;
 
     // Get all column names
@@ -581,7 +582,10 @@ pub async fn get_person_rows_mapped(
     }
 
     let mut m = mapping.cloned().unwrap_or_default();
-    let all_column_set = all_columns.iter().map(String::as_str).collect::<HashSet<_>>();
+    let all_column_set = all_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     require_mapped_column(&all_column_set, &m.id)?;
     require_mapped_column(&all_column_set, &m.first_name)?;
     require_mapped_column(&all_column_set, &m.last_name)?;

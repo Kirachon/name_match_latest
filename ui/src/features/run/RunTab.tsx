@@ -91,7 +91,8 @@ export function RunTab({ onComplete }: { onComplete: () => void }) {
     if (!parsed.ok) {
       return {
         disabled: true,
-        title: parsed.issues.slice(0, 2).join("; ") || "Configuration is invalid",
+        title:
+          parsed.issues.slice(0, 2).join("; ") || "Configuration is invalid",
       };
     }
     const block = scaleBlockReason(parsed.value);
