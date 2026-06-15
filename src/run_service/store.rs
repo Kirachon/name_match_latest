@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy)]
@@ -36,9 +37,9 @@ pub struct StoredJob {
     pub summary: JobSummaryDto,
     pub allow_birthdate_swap: bool,
     pub persist_result_history: bool,
-    pub rows: Vec<MatchPairDto>,
-    pub source_people: Vec<Person>,
-    pub target_people: Vec<Person>,
+    pub rows: Arc<Vec<MatchPairDto>>,
+    pub source_people: Arc<Vec<Person>>,
+    pub target_people: Arc<Vec<Person>>,
     pub last_accessed_unix_ms: u64,
     /// When true, match rows live in SQLite only (bounded RAM for million-row jobs).
     pub spilled: bool,
@@ -132,9 +133,9 @@ impl ResultStore {
                 },
                 allow_birthdate_swap,
                 persist_result_history,
-                rows: Vec::new(),
-                source_people: Vec::new(),
-                target_people: Vec::new(),
+                rows: Arc::new(Vec::new()),
+                source_people: Arc::new(Vec::new()),
+                target_people: Arc::new(Vec::new()),
                 last_accessed_unix_ms: started_at_unix_ms,
                 spilled: false,
             },
@@ -147,7 +148,7 @@ impl ResultStore {
         match g.get_mut(job_id) {
             Some(slot) => {
                 slot.summary.matches_found = rows.len() as u64;
-                slot.rows = rows;
+                slot.rows = Arc::new(rows);
                 slot.last_accessed_unix_ms = now_ms();
                 if slot.persist_result_history
                     && let Some(sqlite) = &self.sqlite
@@ -187,16 +188,16 @@ impl ResultStore {
                         sqlite.upsert_job_metadata(slot)?;
                         if !slot.rows.is_empty() {
                             sqlite.append_result_rows(&slot.summary.job_id, &slot.rows)?;
-                            slot.rows.clear();
+                            Arc::make_mut(&mut slot.rows).clear();
                         }
                         sqlite.append_result_rows(&slot.summary.job_id, rows)?;
                         slot.spilled = true;
                     } else {
-                        slot.rows.extend_from_slice(rows);
+                        Arc::make_mut(&mut slot.rows).extend_from_slice(rows);
                         slot.summary.matches_found = slot.rows.len() as u64;
                     }
                 } else {
-                    slot.rows.extend_from_slice(rows);
+                    Arc::make_mut(&mut slot.rows).extend_from_slice(rows);
                     slot.summary.matches_found = slot.rows.len() as u64;
                     if slot.persist_result_history
                         && let Some(sqlite) = &self.sqlite
@@ -218,15 +219,15 @@ impl ResultStore {
             bail!("Unknown job id: {}", job_id);
         };
         slot.spilled = true;
-        slot.rows.clear();
+        Arc::make_mut(&mut slot.rows).clear();
         Ok(())
     }
 
     pub fn set_person_snapshots(
         &self,
         job_id: &str,
-        source_people: Vec<Person>,
-        target_people: Vec<Person>,
+        source_people: Arc<Vec<Person>>,
+        target_people: Arc<Vec<Person>>,
     ) -> Result<()> {
         let mut g = self.inner.lock();
         match g.get_mut(job_id) {
@@ -238,6 +239,13 @@ impl ResultStore {
                     && let Some(sqlite) = &self.sqlite
                 {
                     sqlite.save_job(slot)?;
+                }
+                // Bound RAM for large jobs: once rows have spilled to SQLite, keep
+                // person snapshots in SQLite only. Explain/diff reload them from
+                // result_person_lookup, or degrade gracefully for trimmed large runs.
+                if slot.spilled {
+                    slot.source_people = Arc::new(Vec::new());
+                    slot.target_people = Arc::new(Vec::new());
                 }
                 Ok(())
             }
@@ -431,7 +439,7 @@ impl ResultStore {
                 filter.min_confidence,
                 filter.levels,
                 chunk_size,
-                |chunk| deliver(chunk),
+                deliver,
             )?;
         } else {
             let rows = self.load_in_memory_rows(job_id)?;
@@ -474,10 +482,10 @@ impl ResultStore {
         Ok(false)
     }
 
-    fn load_in_memory_rows(&self, job_id: &str) -> Result<Vec<MatchPairDto>> {
+    fn load_in_memory_rows(&self, job_id: &str) -> Result<Arc<Vec<MatchPairDto>>> {
         let g = self.inner.lock();
         if let Some(slot) = g.get(job_id) {
-            return Ok(slot.rows.clone());
+            return Ok(Arc::clone(&slot.rows));
         }
         drop(g);
         if let Some(sqlite) = &self.sqlite {
@@ -491,18 +499,18 @@ impl ResultStore {
         bail!("Unknown job id: {}", job_id)
     }
 
-    fn load_rows_for_diff(&self, job_id: &str) -> Result<Vec<MatchPairDto>> {
+    fn load_rows_for_diff(&self, job_id: &str) -> Result<Arc<Vec<MatchPairDto>>> {
         let g = self.inner.lock();
         if let Some(slot) = g.get(job_id) {
             if !job_rows_live_in_sqlite(slot) {
-                return Ok(slot.rows.clone());
+                return Ok(Arc::clone(&slot.rows));
             }
         }
         drop(g);
         let sqlite = self.sqlite.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Diff for large spilled jobs requires SQLite storage")
         })?;
-        sqlite.load_all_result_rows(job_id)
+        sqlite.load_all_result_rows(job_id).map(Arc::new)
     }
 
     /// Implementation for the Tauri `get_results_page` command.
@@ -912,9 +920,9 @@ impl SqliteStore {
             summary,
             allow_birthdate_swap,
             persist_result_history: true,
-            rows: if spilled { Vec::new() } else { rows },
-            source_people: load_people("source")?,
-            target_people: load_people("target")?,
+            rows: Arc::new(if spilled { Vec::new() } else { rows }),
+            source_people: Arc::new(load_people("source")?),
+            target_people: Arc::new(load_people("target")?),
             last_accessed_unix_ms: now_ms(),
             spilled,
         }))
@@ -959,8 +967,7 @@ impl SqliteStore {
             params.push(Box::new(min_confidence));
         }
         if !levels.is_empty() {
-            let placeholders = std::iter::repeat("?")
-                .take(levels.len())
+            let placeholders = std::iter::repeat_n("?", levels.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             where_parts.push(format!("matched_at_level IN ({placeholders})"));
@@ -1002,8 +1009,10 @@ impl SqliteStore {
             params.push(Box::new(min));
         }
         if let Some(q) = req.query.as_deref().filter(|q| !q.trim().is_empty()) {
-            where_parts.push("row_json LIKE ?".to_string());
-            params.push(Box::new(format!("%{}%", q.trim())));
+            where_parts.push("(source_name LIKE ? OR target_name LIKE ?)".to_string());
+            let like = format!("%{}%", q.trim());
+            params.push(Box::new(like.clone()));
+            params.push(Box::new(like));
         }
         let base_where_sql = where_parts.join(" AND ");
         let level_counts_sql = format!(
@@ -1023,8 +1032,7 @@ impl SqliteStore {
         }
         let available_levels = level_counts.keys().copied().collect();
         if !req.levels.is_empty() {
-            let placeholders = std::iter::repeat("?")
-                .take(req.levels.len())
+            let placeholders = std::iter::repeat_n("?", req.levels.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             where_parts.push(format!("matched_at_level IN ({placeholders})"));
@@ -1214,10 +1222,18 @@ fn ensure_results_schema(conn: &Connection) -> Result<()> {
             "ALTER TABLE results ADD COLUMN source_name TEXT NOT NULL DEFAULT ''",
             [],
         )?;
+        conn.execute(
+            "UPDATE results SET source_name = COALESCE(json_extract(row_json, '$.source_full_name'), '')",
+            [],
+        )?;
     }
     if !columns.iter().any(|column| column == "target_name") {
         conn.execute(
             "ALTER TABLE results ADD COLUMN target_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE results SET target_name = COALESCE(json_extract(row_json, '$.target_full_name'), '')",
             [],
         )?;
     }
@@ -2038,14 +2054,14 @@ mod tests {
         store
             .set_person_snapshots(
                 "duplicates",
-                vec![
+                Arc::new(vec![
                     mk_person(7, "Ana", "Santos"),
                     mk_person(7, "Ana Maria", "Santos"),
-                ],
-                vec![
+                ]),
+                Arc::new(vec![
                     mk_person(9, "Ben", "Reyes"),
                     mk_person(9, "Benjamin", "Reyes"),
-                ],
+                ]),
             )
             .unwrap();
         drop(store);
@@ -2077,8 +2093,8 @@ mod tests {
         store
             .set_person_snapshots(
                 "fast",
-                vec![mk_person(1, "Ana", "Santos")],
-                vec![mk_person(2, "Ana", "Santos")],
+                Arc::new(vec![mk_person(1, "Ana", "Santos")]),
+                Arc::new(vec![mk_person(2, "Ana", "Santos")]),
             )
             .unwrap();
         store

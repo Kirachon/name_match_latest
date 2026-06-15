@@ -61,17 +61,62 @@ fn validate_ident(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn discover_table_columns(
+fn require_mapped_column(
+    all_columns: &std::collections::HashSet<&str>,
+    column: &str,
+) -> Result<()> {
+    validate_ident(column)?;
+    if !all_columns.contains(column) {
+        bail!(
+            "Mapped column '{}' does not exist in the selected table",
+            column
+        );
+    }
+    Ok(())
+}
+
+fn optional_mapped_column(
+    all_columns: &std::collections::HashSet<&str>,
+    column: &mut Option<String>,
+) -> Result<()> {
+    if let Some(value) = column.as_deref() {
+        validate_ident(value)?;
+        if !all_columns.contains(value) {
+            *column = None;
+        }
+    }
+    Ok(())
+}
+
+/// Read a column as a string, trying the common MySQL scalar types in order.
+fn row_value_as_string(row: &sqlx::mysql::MySqlRow, index: &str) -> Option<String> {
+    if let Ok(v) = row.try_get::<String, _>(index) {
+        Some(v)
+    } else if let Ok(v) = row.try_get::<i64, _>(index) {
+        Some(v.to_string())
+    } else if let Ok(v) = row.try_get::<f64, _>(index) {
+        Some(v.to_string())
+    } else if let Ok(v) = row.try_get::<bool, _>(index) {
+        Some(v.to_string())
+    } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(index) {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+async fn fetch_table_column_rows(
     pool: &MySqlPool,
     database: &str,
     table: &str,
-) -> Result<TableColumns> {
+) -> Result<Vec<sqlx::mysql::MySqlRow>> {
     validate_ident(database)?;
     validate_ident(table)?;
 
     let rows = sqlx::query(
         r#"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"#,
+            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+            ORDER BY ORDINAL_POSITION"#,
     )
     .bind(database)
     .bind(table)
@@ -79,17 +124,47 @@ pub async fn discover_table_columns(
     .await
     .with_context(|| format!("Failed to query columns for {}.{}", database, table))?;
 
-    // Fallback: some MySQL setups (especially on Windows hosts with case-sensitive filesystems)
-    // may return zero rows from INFORMATION_SCHEMA even when the table exists. If that happens,
-    // run a DESCRIBE fallback to keep execution unblocked.
-    let rows = if rows.is_empty() {
+    if rows.is_empty() {
         sqlx::query(&format!("DESCRIBE `{}`.`{}`", database, table))
             .fetch_all(pool)
             .await
-            .with_context(|| format!("DESCRIBE fallback failed for {}.{}", database, table))?
+            .with_context(|| format!("DESCRIBE fallback failed for {}.{}", database, table))
     } else {
-        rows
-    };
+        Ok(rows)
+    }
+}
+
+/// INFORMATION_SCHEMA uses `COLUMN_NAME`; `DESCRIBE` uses `Field`.
+fn column_name_from_row(row: &sqlx::mysql::MySqlRow) -> Option<String> {
+    row.try_get::<String, _>("COLUMN_NAME")
+        .ok()
+        .or_else(|| row.try_get::<String, _>("Field").ok())
+}
+
+/// Collect non-standard columns into the dynamic extra-fields map.
+fn collect_extra_fields(
+    row: &sqlx::mysql::MySqlRow,
+    all_columns: &[String],
+    standard_cols: &[&str],
+) -> std::collections::HashMap<String, String> {
+    let mut extra = std::collections::HashMap::new();
+    for col in all_columns {
+        if standard_cols.contains(&col.as_str()) {
+            continue;
+        }
+        if let Some(value) = row_value_as_string(row, col.as_str()) {
+            extra.insert(col.clone(), value);
+        }
+    }
+    extra
+}
+
+pub async fn discover_table_columns(
+    pool: &MySqlPool,
+    database: &str,
+    table: &str,
+) -> Result<TableColumns> {
+    let rows = fetch_table_column_rows(pool, database, table).await?;
 
     let mut cols = TableColumns {
         has_id: false,
@@ -101,7 +176,9 @@ pub async fn discover_table_columns(
         has_hh_id: false,
     };
     for r in rows {
-        let name: String = r.try_get("COLUMN_NAME")?;
+        let Some(name) = column_name_from_row(&r) else {
+            continue;
+        };
         match name.as_str() {
             "id" => cols.has_id = true,
             "uuid" => cols.has_uuid = true,
@@ -122,31 +199,11 @@ pub async fn get_all_table_columns(
     database: &str,
     table: &str,
 ) -> Result<Vec<String>> {
-    validate_ident(database)?;
-    validate_ident(table)?;
-
-    let rows = sqlx::query(
-        r#"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-            ORDER BY ORDINAL_POSITION"#,
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("Failed to query all columns for {}.{}", database, table))?;
-
-    let mut columns = Vec::new();
-    for r in rows {
-        let name: String = r.try_get("COLUMN_NAME")?;
-        columns.push(name);
-    }
-    Ok(columns)
+    let rows = fetch_table_column_rows(pool, database, table).await?;
+    Ok(rows.iter().filter_map(column_name_from_row).collect())
 }
 
 pub async fn get_person_rows(pool: &MySqlPool, table: &str) -> Result<Vec<Person>> {
-    use std::collections::HashMap;
-
     validate_ident(table)?;
 
     // Get database name from pool connection string
@@ -194,7 +251,7 @@ pub async fn get_person_rows(pool: &MySqlPool, table: &str) -> Result<Vec<Person
                     .map(|v| v.to_string())
                     .or_else(|| row.try_get::<Option<String>, _>("hh_id").ok().flatten());
 
-                let mut person = Person {
+                let person = Person {
                     id: row.try_get("id").unwrap_or(0),
                     uuid: row.try_get("uuid").ok(),
                     first_name: row.try_get("first_name").ok(),
@@ -202,28 +259,8 @@ pub async fn get_person_rows(pool: &MySqlPool, table: &str) -> Result<Vec<Person
                     last_name: row.try_get("last_name").ok(),
                     birthdate: row.try_get("birthdate").ok(),
                     hh_id,
-                    extra_fields: HashMap::new(),
+                    extra_fields: collect_extra_fields(&row, &all_columns, &standard_cols).into(),
                 };
-
-                // Populate extra fields (columns not in standard set)
-                for col in &all_columns {
-                    if !standard_cols.contains(&col.as_str()) {
-                        if let Ok(value) = row.try_get::<String, _>(col.as_str()) {
-                            person.extra_fields.insert(col.clone(), value);
-                        } else if let Ok(value) = row.try_get::<i64, _>(col.as_str()) {
-                            person.extra_fields.insert(col.clone(), value.to_string());
-                        } else if let Ok(value) = row.try_get::<f64, _>(col.as_str()) {
-                            person.extra_fields.insert(col.clone(), value.to_string());
-                        } else if let Ok(value) = row.try_get::<bool, _>(col.as_str()) {
-                            person.extra_fields.insert(col.clone(), value.to_string());
-                        } else if let Ok(Some(value)) =
-                            row.try_get::<Option<String>, _>(col.as_str())
-                        {
-                            person.extra_fields.insert(col.clone(), value);
-                        }
-                        // If all conversions fail, skip this column (NULL or unsupported type)
-                    }
-                }
 
                 persons.push(person);
             }
@@ -290,8 +327,6 @@ pub async fn get_person_rows_with_all_columns(
     database: &str,
     table: &str,
 ) -> Result<Vec<Person>> {
-    use std::collections::HashMap;
-
     validate_ident(table)?;
 
     // Get all column names
@@ -337,7 +372,7 @@ pub async fn get_person_rows_with_all_columns(
             .map(|v| v.to_string())
             .or_else(|| row.try_get::<Option<String>, _>("hh_id").ok().flatten());
 
-        let mut person = Person {
+        let person = Person {
             id: row.try_get("id").unwrap_or(0),
             uuid: row.try_get("uuid").ok(),
             first_name: row.try_get("first_name").ok(),
@@ -345,26 +380,8 @@ pub async fn get_person_rows_with_all_columns(
             last_name: row.try_get("last_name").ok(),
             birthdate: row.try_get("birthdate").ok(),
             hh_id,
-            extra_fields: HashMap::new(),
+            extra_fields: collect_extra_fields(&row, &all_columns, &standard_cols).into(),
         };
-
-        // Populate extra fields (columns not in standard set)
-        for col in &all_columns {
-            if !standard_cols.contains(&col.as_str()) {
-                if let Ok(value) = row.try_get::<String, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value);
-                } else if let Ok(value) = row.try_get::<i64, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(value) = row.try_get::<f64, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(value) = row.try_get::<bool, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(Some(value)) = row.try_get::<Option<String>, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value);
-                }
-                // If all conversions fail, skip this column (NULL or unsupported type)
-            }
-        }
 
         persons.push(person);
     }
@@ -386,7 +403,6 @@ pub async fn fetch_person_rows_chunk_all_columns(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<Person>> {
-    use std::collections::HashMap;
     validate_ident(table)?;
     let database = extract_database_from_pool(pool).await?;
     let all_columns = get_all_table_columns(pool, &database, table).await?;
@@ -435,7 +451,7 @@ pub async fn fetch_person_rows_chunk_all_columns(
             .map(|v| v.to_string())
             .or_else(|| row.try_get::<Option<String>, _>("hh_id").ok().flatten());
 
-        let mut person = Person {
+        let person = Person {
             id: row.try_get("id").unwrap_or(0),
             uuid: row.try_get("uuid").ok(),
             first_name: row.try_get("first_name").ok(),
@@ -443,23 +459,8 @@ pub async fn fetch_person_rows_chunk_all_columns(
             last_name: row.try_get("last_name").ok(),
             birthdate: row.try_get("birthdate").ok(),
             hh_id,
-            extra_fields: HashMap::new(),
+            extra_fields: collect_extra_fields(&row, &all_columns, &standard_cols).into(),
         };
-        for col in &all_columns {
-            if !standard_cols.contains(&col.as_str()) {
-                if let Ok(value) = row.try_get::<String, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value);
-                } else if let Ok(value) = row.try_get::<i64, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(value) = row.try_get::<f64, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(value) = row.try_get::<bool, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(Some(value)) = row.try_get::<Option<String>, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value);
-                }
-            }
-        }
         persons.push(person);
     }
     Ok(persons)
@@ -561,7 +562,7 @@ pub async fn get_person_rows_mapped(
     table: &str,
     mapping: Option<&ColumnMapping>,
 ) -> Result<Vec<Person>> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     super::schema::validate_ident(table)?;
     let database = extract_database_from_pool(pool).await?;
@@ -580,7 +581,19 @@ pub async fn get_person_rows_mapped(
         return Ok(rows);
     }
 
-    let m = mapping.cloned().unwrap_or_default();
+    let mut m = mapping.cloned().unwrap_or_default();
+    let all_column_set = all_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    require_mapped_column(&all_column_set, &m.id)?;
+    require_mapped_column(&all_column_set, &m.first_name)?;
+    require_mapped_column(&all_column_set, &m.last_name)?;
+    require_mapped_column(&all_column_set, &m.birthdate)?;
+    optional_mapped_column(&all_column_set, &mut m.uuid)?;
+    optional_mapped_column(&all_column_set, &mut m.middle_name)?;
+    optional_mapped_column(&all_column_set, &mut m.hh_id)?;
+
     let mut mapped_cols = HashSet::new();
     for col in [
         Some(m.id.as_str()),
@@ -619,7 +632,16 @@ pub async fn get_person_rows_mapped(
             .flatten()
             .map(|v| v.to_string())
             .or_else(|| row.try_get::<Option<String>, _>("hh_id").ok().flatten());
-        let mut person = Person {
+        let mut extra = std::collections::HashMap::new();
+        for col in &all_columns {
+            if mapped_cols.contains(col) {
+                continue;
+            }
+            if let Some(value) = row_value_as_string(&row, format!("extra_{}", col).as_str()) {
+                extra.insert(col.clone(), value);
+            }
+        }
+        let person = Person {
             id: row.try_get("id").unwrap_or(0),
             uuid: row.try_get("uuid").ok(),
             first_name: row.try_get("first_name").ok(),
@@ -627,25 +649,8 @@ pub async fn get_person_rows_mapped(
             last_name: row.try_get("last_name").ok(),
             birthdate: row.try_get("birthdate").ok(),
             hh_id,
-            extra_fields: HashMap::new(),
+            extra_fields: extra.into(),
         };
-        for col in &all_columns {
-            if mapped_cols.contains(col) {
-                continue;
-            }
-            let alias = format!("extra_{}", col);
-            if let Ok(value) = row.try_get::<String, _>(alias.as_str()) {
-                person.extra_fields.insert(col.clone(), value);
-            } else if let Ok(value) = row.try_get::<i64, _>(alias.as_str()) {
-                person.extra_fields.insert(col.clone(), value.to_string());
-            } else if let Ok(value) = row.try_get::<f64, _>(alias.as_str()) {
-                person.extra_fields.insert(col.clone(), value.to_string());
-            } else if let Ok(value) = row.try_get::<bool, _>(alias.as_str()) {
-                person.extra_fields.insert(col.clone(), value.to_string());
-            } else if let Ok(Some(value)) = row.try_get::<Option<String>, _>(alias.as_str()) {
-                person.extra_fields.insert(col.clone(), value);
-            }
-        }
         persons.push(person);
     }
     Ok(persons)
@@ -1034,7 +1039,6 @@ pub async fn fetch_person_rows_chunk_all_columns_keyset(
     limit: i64,
     watermark_id: Option<i64>,
 ) -> Result<Vec<Person>> {
-    use std::collections::HashMap;
     validate_ident(table)?;
     let database = extract_database_from_pool(pool).await?;
     let all_columns = get_all_table_columns(pool, &database, table).await?;
@@ -1093,7 +1097,7 @@ pub async fn fetch_person_rows_chunk_all_columns_keyset(
             .map(|v| v.to_string())
             .or_else(|| row.try_get::<Option<String>, _>("hh_id").ok().flatten());
 
-        let mut person = Person {
+        let person = Person {
             id: row.try_get("id").unwrap_or(0),
             uuid: row.try_get("uuid").ok(),
             first_name: row.try_get("first_name").ok(),
@@ -1101,23 +1105,8 @@ pub async fn fetch_person_rows_chunk_all_columns_keyset(
             last_name: row.try_get("last_name").ok(),
             birthdate: row.try_get("birthdate").ok(),
             hh_id,
-            extra_fields: HashMap::new(),
+            extra_fields: collect_extra_fields(&row, &all_columns, &standard_cols).into(),
         };
-        for col in &all_columns {
-            if !standard_cols.contains(&col.as_str()) {
-                if let Ok(value) = row.try_get::<String, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value);
-                } else if let Ok(value) = row.try_get::<i64, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(value) = row.try_get::<f64, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(value) = row.try_get::<bool, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value.to_string());
-                } else if let Ok(Some(value)) = row.try_get::<Option<String>, _>(col.as_str()) {
-                    person.extra_fields.insert(col.clone(), value);
-                }
-            }
-        }
         persons.push(person);
     }
 

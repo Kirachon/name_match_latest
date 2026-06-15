@@ -175,10 +175,7 @@ export const CsvImportRequestSchema = z
         message: "Replace mode requires explicit confirmation",
       });
     }
-    if (
-      request.policy.id_behavior === "use-csv-id" &&
-      !request.mapping.id
-    ) {
+    if (request.policy.id_behavior === "use-csv-id" && !request.mapping.id) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["mapping", "id"],
@@ -411,9 +408,7 @@ export function parseRunConfig(
 
 export function parseCsvImportRequest(
   value: unknown,
-):
-  | { ok: true; value: CsvImportRequestDto }
-  | { ok: false; issues: string[] } {
+): { ok: true; value: CsvImportRequestDto } | { ok: false; issues: string[] } {
   const r = CsvImportRequestSchema.safeParse(value);
   if (r.success) return { ok: true, value: r.data as CsvImportRequestDto };
   return {
@@ -441,9 +436,7 @@ export function parseCsvImportDryRunResult(
 
 export function parseCsvImportJob(
   value: unknown,
-):
-  | { ok: true; value: CsvImportJobDto }
-  | { ok: false; issues: string[] } {
+): { ok: true; value: CsvImportJobDto } | { ok: false; issues: string[] } {
   const r = CsvImportJobSchema.safeParse(value);
   if (r.success) return { ok: true, value: r.data as CsvImportJobDto };
   return {

@@ -56,8 +56,8 @@ export function ConnectTab({ onAdvance }: { onAdvance: () => void }) {
                 </li>
                 <li>Row counts are estimates — they’re cached per session.</li>
                 <li>
-                  CSV import preview supports encoding, delimiter, and date-format
-                  overrides.
+                  CSV import preview supports encoding, delimiter, and
+                  date-format overrides.
                 </li>
               </ul>
             </div>

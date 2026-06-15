@@ -49,7 +49,9 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
     const picked = await open({
       directory: false,
       multiple: false,
-      filters: [{ name: "CSV or Excel", extensions: ["csv", "txt", "xlsx", "xls"] }],
+      filters: [
+        { name: "CSV or Excel", extensions: ["csv", "txt", "xlsx", "xls"] },
+      ],
     }).catch(() => null);
     if (typeof picked === "string") {
       setFileSource(side, {
@@ -130,7 +132,9 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
           file.preview ? (
             <Pill tone="info">{file.preview.headers.length} columns</Pill>
           ) : (
-            <Pill tone="mute">{selectedFileIsExcel ? "Excel" : "CSV / Excel"}</Pill>
+            <Pill tone="mute">
+              {selectedFileIsExcel ? "Excel" : "CSV / Excel"}
+            </Pill>
           )
         }
       />
@@ -145,7 +149,7 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
                 preview: null,
                 error: null,
                 sheetName: null,
-              })
+              });
               setColumnMapping(side, null);
             }}
             placeholder="C:/data/beneficiaries.csv or .xlsx"
@@ -156,7 +160,11 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
         </div>
       </Field>
       <div
-        className={selectedFileIsExcel ? "grid md:grid-cols-2 gap-3" : "grid md:grid-cols-3 gap-3"}
+        className={
+          selectedFileIsExcel
+            ? "grid md:grid-cols-2 gap-3"
+            : "grid md:grid-cols-3 gap-3"
+        }
       >
         {!selectedFileIsExcel && (
           <>
@@ -184,7 +192,8 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
                 value={file.delimiter ?? ""}
                 onChange={(e) =>
                   setFileSource(side, {
-                    delimiter: (e.target.value || null) as CsvDelimiterDto | null,
+                    delimiter: (e.target.value ||
+                      null) as CsvDelimiterDto | null,
                     preview: null,
                   })
                 }
@@ -242,9 +251,7 @@ export function FileSourceCard({ side }: { side: SessionSide }) {
         <Button tone="primary" loading={file.loading} onClick={() => preview()}>
           Preview file
         </Button>
-        {file.preview && (
-          <Pill tone="ok">{previewMeta(file.preview)}</Pill>
-        )}
+        {file.preview && <Pill tone="ok">{previewMeta(file.preview)}</Pill>}
       </div>
       {file.error && (
         <div role="alert" className="help-error">
@@ -279,7 +286,6 @@ function columnsFromHeaders(headers: string[]): TableColumnsDto {
 }
 
 function inferColumnMapping(headers: string[]): ColumnMappingDto | null {
-  const columns = columnsFromHeaders(headers);
   const id = pick(headers, ["id", "person_id", "beneficiary_id"]);
   const first_name = pick(headers, [
     "first_name",
@@ -302,12 +308,12 @@ function inferColumnMapping(headers: string[]): ColumnMappingDto | null {
   if (!id || !first_name || !last_name || !birthdate) return null;
   return {
     id,
-    uuid: columns.has_uuid ? "uuid" : null,
+    uuid: pick(headers, ["uuid"]) || null,
     first_name,
     middle_name: pick(headers, ["middle_name", "middlename", "mname"]) || null,
     last_name,
     birthdate,
-    hh_id: columns.has_hh_id ? "hh_id" : null,
+    hh_id: pick(headers, ["hh_id", "household_id"]) || null,
   };
 }
 

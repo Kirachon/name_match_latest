@@ -3,8 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { MatchPairDto, ReviewDecisionValue } from "@/shared/tauri/types";
 import { MatchRow } from "./MatchRow";
 
-const COL_TEMPLATE =
-  "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px 116px";
+const COL_TEMPLATE = "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px 116px";
 
 export function ResultsTable({
   rows,

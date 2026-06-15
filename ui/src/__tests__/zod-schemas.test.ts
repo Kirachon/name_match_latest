@@ -215,7 +215,13 @@ function validCsvImportDryRun(): CsvImportDryRunResultDto {
     warnings: [],
     invalid_samples: [],
     planned_columns: ["id", "first_name", "last_name", "birthdate"],
-    planned_indexes: [{ name: "idx_name_bd", columns: ["last_name", "birthdate"], unique: false }],
+    planned_indexes: [
+      {
+        name: "idx_name_bd",
+        columns: ["last_name", "birthdate"],
+        unique: false,
+      },
+    ],
     plan_hash: "plan-abc",
     duplicate_probe_status: "complete",
     staging_table: "_nm_import_staging",

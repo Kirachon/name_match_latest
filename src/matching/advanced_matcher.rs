@@ -760,7 +760,7 @@ mod tests {
             last_name: Some(l.into()),
             birthdate: NaiveDate::from_ymd_opt(bd.0, bd.1, bd.2),
             hh_id: None,
-            extra_fields: e,
+            extra_fields: e.into(),
         }
     }
     #[test]

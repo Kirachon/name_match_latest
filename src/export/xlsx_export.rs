@@ -747,7 +747,7 @@ mod tests {
             last_name: Some(l.into()),
             birthdate: NaiveDate::from_ymd_opt(d.0, d.1, d.2),
             hh_id: None,
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         }
     }
 

@@ -1,4 +1,9 @@
-import type { AlgorithmDto, RunConfigDto, RunModeDto, TableSelectionDto } from "@/shared/tauri/types";
+import type {
+  AlgorithmDto,
+  RunConfigDto,
+  RunModeDto,
+  TableSelectionDto,
+} from "@/shared/tauri/types";
 
 export const SCALE_WARN_ROWS = 100_000;
 export const SCALE_STRONG_WARN_ROWS = 500_000;
@@ -18,8 +23,13 @@ export function rowCountForSide(selection: TableSelectionDto): number {
   return selection.row_count ?? 0;
 }
 
-export function maxSideRows(config: Pick<RunConfigDto, "source" | "target">): number {
-  return Math.max(rowCountForSide(config.source), rowCountForSide(config.target));
+export function maxSideRows(
+  config: Pick<RunConfigDto, "source" | "target">,
+): number {
+  return Math.max(
+    rowCountForSide(config.source),
+    rowCountForSide(config.target),
+  );
 }
 
 export function resolveEffectiveRunMode(
@@ -53,7 +63,10 @@ export function scaleBlockReason(
   }
   if (config.cascade?.enabled) return "million-row-cascade";
   if (!algorithmSupportsDbStreaming(config.algorithm)) {
-    if (config.algorithm === "fuzzy" || config.algorithm === "fuzzy-no-middle") {
+    if (
+      config.algorithm === "fuzzy" ||
+      config.algorithm === "fuzzy-no-middle"
+    ) {
       return "million-row-fuzzy";
     }
     return "million-row-unsupported-algorithm";
@@ -81,7 +94,10 @@ export function scaleBlockMessage(reason: ScaleBlockReason): string {
 }
 
 export function streamingBackendActive(
-  config: Pick<RunConfigDto, "source" | "target" | "streaming" | "algorithm" | "cascade">,
+  config: Pick<
+    RunConfigDto,
+    "source" | "target" | "streaming" | "algorithm" | "cascade"
+  >,
 ): boolean {
   if (config.cascade?.enabled) return false;
   if (

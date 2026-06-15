@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, DbSession};
-use name_matcher::db::schema::discover_table_columns;
+use name_matcher::db::schema::{discover_table_columns, get_all_table_columns};
 use name_matcher::run_service::dto::{
     DbCredentialsDto, DbSessionDto, TableColumnsDto, TableInfoDto,
 };
@@ -110,21 +110,9 @@ pub async fn get_table_columns(
         .await
         .map_err(|e| AppError::Database(format!("discover columns for {table}: {e}")))?;
 
-    // Also pull the raw column list for the frontend's hint helper.
-    let raw_rows = sqlx::query(
-        "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
-         ORDER BY ORDINAL_POSITION",
-    )
-    .bind(&s.database)
-    .bind(&table)
-    .fetch_all(&s.pool)
-    .await
-    .map_err(|e| AppError::Database(format!("raw columns: {e}")))?;
-    let raw_columns: Vec<String> = raw_rows
-        .into_iter()
-        .filter_map(|r| r.try_get::<String, _>("COLUMN_NAME").ok())
-        .collect();
+    let raw_columns = get_all_table_columns(&s.pool, &s.database, &table)
+        .await
+        .map_err(|e| AppError::Database(format!("raw columns for {table}: {e}")))?;
 
     Ok(TableColumnsDto {
         has_id: cols.has_id,

@@ -589,6 +589,7 @@ fn run_worker(
         }
     };
     load_timer.finish();
+    let (t1, t2) = (Arc::new(t1), Arc::new(t2));
     sink.emit_log(LogEntryDto {
         job_id: job_id.clone(),
         timestamp_ms: now_ms(),

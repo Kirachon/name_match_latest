@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Person {
@@ -13,7 +14,7 @@ pub struct Person {
     pub hh_id: Option<String>, // New: household key for Table 2
     #[sqlx(skip)]
     #[serde(default)]
-    pub extra_fields: HashMap<String, String>, // Dynamic fields beyond standard schema
+    pub extra_fields: Arc<HashMap<String, String>>, // Dynamic fields beyond standard schema
 }
 
 #[derive(Debug, Clone)]

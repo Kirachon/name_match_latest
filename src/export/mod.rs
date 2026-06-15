@@ -120,7 +120,7 @@ mod tests {
             last_name: Some(last.to_string()),
             birthdate: NaiveDate::from_ymd_opt(birthdate.0, birthdate.1, birthdate.2),
             hh_id: None,
-            extra_fields,
+            extra_fields: extra_fields.into(),
         }
     }
 

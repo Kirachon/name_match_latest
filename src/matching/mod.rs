@@ -5564,7 +5564,8 @@ mod gpu {
         // Cross-outer GPU batch (store pairs) to improve utilization by batching multiple outer records per launch
         let mut batch_pairs: Vec<(usize, usize)> = Vec::with_capacity(tile_max.max(1));
         // Reusable accumulator — retains grow-only pinned buffers across tiles
-        let mut reusable_acc = crate::matching::gpu::batch::GpuBatchAccumulator::new(tile_max.max(1));
+        let mut reusable_acc =
+            crate::matching::gpu::batch::GpuBatchAccumulator::new(tile_max.max(1));
 
         // Track seen pairs to deduplicate when multiple lookup variants hit the same pair.
         let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
@@ -5886,7 +5887,7 @@ fn to_original<'a>(np: &NormalizedPerson, originals: &'a [Person]) -> Person {
             last_name: np.last_name.clone(),
             birthdate: np.birthdate,
             hh_id: None,
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         })
 }
 
@@ -5906,7 +5907,7 @@ mod tests {
             last_name: Some(l.into()),
             birthdate: NaiveDate::from_ymd_opt(d.0, d.1, d.2),
             hh_id: None,
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         }
     }
     #[test]
@@ -6154,7 +6155,7 @@ mod tests {
             last_name: Some("Lee".into()),
             birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
             hh_id: None,
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         };
         let n = normalize_person(&a);
         let h1 = hash_key_for_np(MatchingAlgorithm::IdUuidYasIsMatchedInfnbd, &n);
@@ -6167,7 +6168,7 @@ mod tests {
             last_name: Some("Lee".into()),
             birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
             hh_id: None,
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         };
         let n2 = normalize_person(&b);
         let h2 = hash_key_for_np(MatchingAlgorithm::IdUuidYasIsMatchedInfnbd, &n2);
@@ -6181,7 +6182,7 @@ mod tests {
             last_name: Some("Lee".into()),
             birthdate: None,
             hh_id: None,
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         };
         let n3 = normalize_person(&c);
         assert!(hash_key_for_np(MatchingAlgorithm::IdUuidYasIsMatchedInfnbd, &n3).is_none());
@@ -6241,7 +6242,7 @@ mod tests {
                 last_name: Some("García".into()),
                 birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             },
             Person {
                 id: 2,
@@ -6251,7 +6252,7 @@ mod tests {
                 last_name: Some("Lee".into()),
                 birthdate: NaiveDate::from_ymd_opt(1985, 5, 5),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             },
         ];
         let t2 = vec![
@@ -6263,7 +6264,7 @@ mod tests {
                 last_name: Some("Garcia".into()),
                 birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             },
             Person {
                 id: 20,
@@ -6273,7 +6274,7 @@ mod tests {
                 last_name: Some("Lee".into()),
                 birthdate: NaiveDate::from_ymd_opt(1985, 5, 5),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             },
             Person {
                 id: 21,
@@ -6283,7 +6284,7 @@ mod tests {
                 last_name: Some("Lee".into()),
                 birthdate: NaiveDate::from_ymd_opt(1985, 5, 5),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             },
         ];
         // Algorithm 1 (no middle name)
@@ -6331,7 +6332,7 @@ fn fuzzy_basic() {
         last_name: Some("Smith".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let b = vec![Person {
         id: 2,
@@ -6341,7 +6342,7 @@ fn fuzzy_basic() {
         last_name: Some("Smith".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let r = match_all(&a, &b, MatchingAlgorithm::Fuzzy, |_| {});
     assert_eq!(r.len(), 1);
@@ -6377,7 +6378,7 @@ fn optional_fields_algo1_requirements() {
         last_name: Some("Lee".into()),
         birthdate: None,
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let b = vec![Person {
         id: 2,
@@ -6387,7 +6388,7 @@ fn optional_fields_algo1_requirements() {
         last_name: Some("Lee".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let r = match_all(&a, &b, MatchingAlgorithm::IdUuidYasIsMatchedInfnbd, |_| {});
     assert_eq!(r.len(), 0);
@@ -6400,7 +6401,7 @@ fn optional_fields_algo1_requirements() {
         last_name: Some("Lee".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let b2 = vec![Person {
         id: 4,
@@ -6410,7 +6411,7 @@ fn optional_fields_algo1_requirements() {
         last_name: Some("Lee".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let r2 = match_all(
         &a2,
@@ -6433,7 +6434,7 @@ fn optional_fields_algo2_middle_none_allowed() {
         last_name: Some("Lee".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let b = vec![Person {
         id: 20,
@@ -6443,7 +6444,7 @@ fn optional_fields_algo2_middle_none_allowed() {
         last_name: Some("Lee".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let r = match_all(
         &a,
@@ -6467,7 +6468,7 @@ fn fuzzy_requires_birthdate_and_some_name_content() {
         last_name: Some("Smith".into()),
         birthdate: None,
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let b = vec![Person {
         id: 40,
@@ -6477,7 +6478,7 @@ fn fuzzy_requires_birthdate_and_some_name_content() {
         last_name: Some("Smith".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let r = match_all(&a, &b, MatchingAlgorithm::Fuzzy, |_| {});
     assert_eq!(r.len(), 0);
@@ -6490,7 +6491,7 @@ fn fuzzy_requires_birthdate_and_some_name_content() {
         last_name: None,
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let b2 = vec![Person {
         id: 41,
@@ -6500,7 +6501,7 @@ fn fuzzy_requires_birthdate_and_some_name_content() {
         last_name: None,
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let r2 = match_all(&a2, &b2, MatchingAlgorithm::Fuzzy, |_| {});
     assert_eq!(r2.len(), 0);
@@ -6518,7 +6519,7 @@ fn opt6_denominator_and_hh_fallback() {
         last_name: Some("Lee".into()),
         birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     // Table2 (source): grouped by hh_id with fallback to id
     // Household 100 has 4 members; 3 should match u1; 1 is different birthdate (no match)
@@ -6531,7 +6532,7 @@ fn opt6_denominator_and_hh_fallback() {
             last_name: Some("Lee".into()),
             birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
             hh_id: Some("100".into()),
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         },
         Person {
             id: 11,
@@ -6541,7 +6542,7 @@ fn opt6_denominator_and_hh_fallback() {
             last_name: Some("Lee".into()),
             birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
             hh_id: Some("100".into()),
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         },
         Person {
             id: 12,
@@ -6551,7 +6552,7 @@ fn opt6_denominator_and_hh_fallback() {
             last_name: Some("Lee".into()),
             birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
             hh_id: Some("100".into()),
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         },
         Person {
             id: 13,
@@ -6561,7 +6562,7 @@ fn opt6_denominator_and_hh_fallback() {
             last_name: Some("Lee".into()),
             birthdate: NaiveDate::from_ymd_opt(1991, 1, 1),
             hh_id: Some("100".into()),
-            extra_fields: std::collections::HashMap::new(),
+            extra_fields: std::collections::HashMap::new().into(),
         },
     ];
     let rows = match_households_gpu_inmemory_opt6(
@@ -6590,7 +6591,7 @@ fn opt6_denominator_and_hh_fallback() {
         last_name: Some("Ray".into()),
         birthdate: NaiveDate::from_ymd_opt(1980, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let t1b = vec![Person {
         id: 2,
@@ -6600,7 +6601,7 @@ fn opt6_denominator_and_hh_fallback() {
         last_name: Some("Ray".into()),
         birthdate: NaiveDate::from_ymd_opt(1980, 1, 1),
         hh_id: None,
-        extra_fields: std::collections::HashMap::new(),
+        extra_fields: std::collections::HashMap::new().into(),
     }];
     let rows_b = match_households_gpu_inmemory_opt6(
         &t1b,
@@ -9173,7 +9174,7 @@ mod gpu_fuzzy_heuristics_tests {
                 last_name: Some("Lee".into()),
                 birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             });
         }
         for j in 0..1000 {
@@ -9185,7 +9186,7 @@ mod gpu_fuzzy_heuristics_tests {
                 last_name: Some("Lee".into()),
                 birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             });
         }
         let (ok, why) = should_enable_gpu_fuzzy_by_heuristic(&t1, &t2);
@@ -9206,7 +9207,7 @@ mod gpu_fuzzy_heuristics_tests {
                 last_name: Some("Lee".into()),
                 birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             });
         }
         for j in 0..10_100 {
@@ -9219,7 +9220,7 @@ mod gpu_fuzzy_heuristics_tests {
                 last_name: Some("Long".into()),
                 birthdate: NaiveDate::from_ymd_opt(1990, 1, 1),
                 hh_id: None,
-                extra_fields: std::collections::HashMap::new(),
+                extra_fields: std::collections::HashMap::new().into(),
             });
         }
         let (ok, why) = should_enable_gpu_fuzzy_by_heuristic(&t1, &t2);

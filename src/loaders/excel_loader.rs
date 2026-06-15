@@ -205,7 +205,7 @@ pub fn load_excel_people(
                 .as_ref()
                 .and_then(|name| value_for(&row_map, name))
                 .map(str::to_string),
-            extra_fields,
+            extra_fields: extra_fields.into(),
         });
     }
 
