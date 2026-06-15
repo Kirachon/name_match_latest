@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "io.namematcher.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm --dir ui dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm --dir ui build",
     "frontendDist": "../ui/dist"
   },
   "app": {
