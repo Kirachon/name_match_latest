@@ -868,7 +868,7 @@ function inferColumnMapping(headers: string[]): ColumnMappingDto | null {
     "birthday",
     "dob",
   ]);
-  if (!first_name || !last_name || !birthdate) return null;
+  if (!id || !first_name || !last_name || !birthdate) return null;
   return {
     id,
     uuid: pick(headers, ["uuid"]) || null,

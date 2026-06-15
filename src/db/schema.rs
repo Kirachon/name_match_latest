@@ -61,6 +61,27 @@ fn validate_ident(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_mapped_column(all_columns: &std::collections::HashSet<&str>, column: &str) -> Result<()> {
+    validate_ident(column)?;
+    if !all_columns.contains(column) {
+        bail!("Mapped column '{}' does not exist in the selected table", column);
+    }
+    Ok(())
+}
+
+fn optional_mapped_column(
+    all_columns: &std::collections::HashSet<&str>,
+    column: &mut Option<String>,
+) -> Result<()> {
+    if let Some(value) = column.as_deref() {
+        validate_ident(value)?;
+        if !all_columns.contains(value) {
+            *column = None;
+        }
+    }
+    Ok(())
+}
+
 /// Read a column as a string, trying the common MySQL scalar types in order.
 fn row_value_as_string(row: &sqlx::mysql::MySqlRow, index: &str) -> Option<String> {
     if let Ok(v) = row.try_get::<String, _>(index) {
@@ -76,6 +97,42 @@ fn row_value_as_string(row: &sqlx::mysql::MySqlRow, index: &str) -> Option<Strin
     } else {
         None
     }
+}
+
+async fn fetch_table_column_rows(
+    pool: &MySqlPool,
+    database: &str,
+    table: &str,
+) -> Result<Vec<sqlx::mysql::MySqlRow>> {
+    validate_ident(database)?;
+    validate_ident(table)?;
+
+    let rows = sqlx::query(
+        r#"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+            ORDER BY ORDINAL_POSITION"#,
+    )
+    .bind(database)
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("Failed to query columns for {}.{}", database, table))?;
+
+    if rows.is_empty() {
+        sqlx::query(&format!("DESCRIBE `{}`.`{}`", database, table))
+            .fetch_all(pool)
+            .await
+            .with_context(|| format!("DESCRIBE fallback failed for {}.{}", database, table))
+    } else {
+        Ok(rows)
+    }
+}
+
+/// INFORMATION_SCHEMA uses `COLUMN_NAME`; `DESCRIBE` uses `Field`.
+fn column_name_from_row(row: &sqlx::mysql::MySqlRow) -> Option<String> {
+    row.try_get::<String, _>("COLUMN_NAME")
+        .ok()
+        .or_else(|| row.try_get::<String, _>("Field").ok())
 }
 
 /// Collect non-standard columns into the dynamic extra-fields map.
@@ -101,30 +158,7 @@ pub async fn discover_table_columns(
     database: &str,
     table: &str,
 ) -> Result<TableColumns> {
-    validate_ident(database)?;
-    validate_ident(table)?;
-
-    let rows = sqlx::query(
-        r#"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"#,
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("Failed to query columns for {}.{}", database, table))?;
-
-    // Fallback: some MySQL setups (especially on Windows hosts with case-sensitive filesystems)
-    // may return zero rows from INFORMATION_SCHEMA even when the table exists. If that happens,
-    // run a DESCRIBE fallback to keep execution unblocked.
-    let rows = if rows.is_empty() {
-        sqlx::query(&format!("DESCRIBE `{}`.`{}`", database, table))
-            .fetch_all(pool)
-            .await
-            .with_context(|| format!("DESCRIBE fallback failed for {}.{}", database, table))?
-    } else {
-        rows
-    };
+    let rows = fetch_table_column_rows(pool, database, table).await?;
 
     let mut cols = TableColumns {
         has_id: false,
@@ -136,7 +170,9 @@ pub async fn discover_table_columns(
         has_hh_id: false,
     };
     for r in rows {
-        let name: String = r.try_get("COLUMN_NAME")?;
+        let Some(name) = column_name_from_row(&r) else {
+            continue;
+        };
         match name.as_str() {
             "id" => cols.has_id = true,
             "uuid" => cols.has_uuid = true,
@@ -157,26 +193,11 @@ pub async fn get_all_table_columns(
     database: &str,
     table: &str,
 ) -> Result<Vec<String>> {
-    validate_ident(database)?;
-    validate_ident(table)?;
-
-    let rows = sqlx::query(
-        r#"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-            ORDER BY ORDINAL_POSITION"#,
-    )
-    .bind(database)
-    .bind(table)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("Failed to query all columns for {}.{}", database, table))?;
-
-    let mut columns = Vec::new();
-    for r in rows {
-        let name: String = r.try_get("COLUMN_NAME")?;
-        columns.push(name);
-    }
-    Ok(columns)
+    let rows = fetch_table_column_rows(pool, database, table).await?;
+    Ok(rows
+        .iter()
+        .filter_map(column_name_from_row)
+        .collect())
 }
 
 pub async fn get_person_rows(pool: &MySqlPool, table: &str) -> Result<Vec<Person>> {
@@ -559,7 +580,16 @@ pub async fn get_person_rows_mapped(
         return Ok(rows);
     }
 
-    let m = mapping.cloned().unwrap_or_default();
+    let mut m = mapping.cloned().unwrap_or_default();
+    let all_column_set = all_columns.iter().map(String::as_str).collect::<HashSet<_>>();
+    require_mapped_column(&all_column_set, &m.id)?;
+    require_mapped_column(&all_column_set, &m.first_name)?;
+    require_mapped_column(&all_column_set, &m.last_name)?;
+    require_mapped_column(&all_column_set, &m.birthdate)?;
+    optional_mapped_column(&all_column_set, &mut m.uuid)?;
+    optional_mapped_column(&all_column_set, &mut m.middle_name)?;
+    optional_mapped_column(&all_column_set, &mut m.hh_id)?;
+
     let mut mapped_cols = HashSet::new();
     for col in [
         Some(m.id.as_str()),

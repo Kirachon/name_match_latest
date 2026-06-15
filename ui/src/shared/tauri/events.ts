@@ -10,12 +10,26 @@ export type ProgressHandler = (e: ProgressEventDto) => void;
 export type StateHandler = (e: JobStateEventDto) => void;
 export type LogHandler = (e: LogEntryDto) => void;
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+async function listenIfAvailable<T>(
+  event: string,
+  cb: (payload: T) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  return listen<T>(event, (evt) => cb(evt.payload));
+}
+
 export async function onProgress(cb: ProgressHandler): Promise<UnlistenFn> {
-  return listen<ProgressEventDto>(EVENT_PROGRESS, (evt) => cb(evt.payload));
+  return listenIfAvailable<ProgressEventDto>(EVENT_PROGRESS, cb);
 }
 export async function onState(cb: StateHandler): Promise<UnlistenFn> {
-  return listen<JobStateEventDto>(EVENT_STATE, (evt) => cb(evt.payload));
+  return listenIfAvailable<JobStateEventDto>(EVENT_STATE, cb);
 }
 export async function onLog(cb: LogHandler): Promise<UnlistenFn> {
-  return listen<LogEntryDto>(EVENT_LOG, (evt) => cb(evt.payload));
+  return listenIfAvailable<LogEntryDto>(EVENT_LOG, cb);
 }

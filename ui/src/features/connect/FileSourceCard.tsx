@@ -279,7 +279,6 @@ function columnsFromHeaders(headers: string[]): TableColumnsDto {
 }
 
 function inferColumnMapping(headers: string[]): ColumnMappingDto | null {
-  const columns = columnsFromHeaders(headers);
   const id = pick(headers, ["id", "person_id", "beneficiary_id"]);
   const first_name = pick(headers, [
     "first_name",
@@ -302,12 +301,12 @@ function inferColumnMapping(headers: string[]): ColumnMappingDto | null {
   if (!id || !first_name || !last_name || !birthdate) return null;
   return {
     id,
-    uuid: columns.has_uuid ? "uuid" : null,
+    uuid: pick(headers, ["uuid"]) || null,
     first_name,
     middle_name: pick(headers, ["middle_name", "middlename", "mname"]) || null,
     last_name,
     birthdate,
-    hh_id: columns.has_hh_id ? "hh_id" : null,
+    hh_id: pick(headers, ["hh_id", "household_id"]) || null,
   };
 }
 

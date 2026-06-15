@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { sideMappingReady } from "@/shared/lib/columnMapping";
 import type {
   ColumnMappingDto,
   CsvDelimiterDto,
@@ -164,14 +165,6 @@ export function readinessForRun(state: Pick<ConnectionStore, "source" | "target"
   ready: boolean;
   reason: string | null;
 } {
-  if (state.source.mode === "file" && !state.source.file.preview)
-    return { ready: false, reason: "Preview a source file" };
-  if (state.source.mode === "file" && !state.source.columnMapping)
-    return { ready: false, reason: "Map the source file columns" };
-  if (state.target.mode === "file" && !state.target.file.preview)
-    return { ready: false, reason: "Preview a target file" };
-  if (state.target.mode === "file" && !state.target.columnMapping)
-    return { ready: false, reason: "Map the target file columns" };
   if (state.source.mode === "database" && !state.source.session)
     return { ready: false, reason: "Connect a source database" };
   if (state.source.mode === "database" && !state.source.selectedTable)
@@ -180,5 +173,10 @@ export function readinessForRun(state: Pick<ConnectionStore, "source" | "target"
     return { ready: false, reason: "Connect a target database" };
   if (state.target.mode === "database" && !state.target.selectedTable)
     return { ready: false, reason: "Select a target table" };
+
+  const source = sideMappingReady("source", state.source);
+  if (!source.ok) return { ready: false, reason: source.reason };
+  const target = sideMappingReady("target", state.target);
+  if (!target.ok) return { ready: false, reason: target.reason };
   return { ready: true, reason: null };
 }

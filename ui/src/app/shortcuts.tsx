@@ -1,6 +1,11 @@
 import { useEffect } from "react";
 import type { TabId } from "@/app/TabBar";
 import {
+  bothSidesHaveGeoColumn,
+  BARANGAY_CODE_HINTS,
+  CITY_CODE_HINTS,
+} from "@/shared/lib/columnMapping";
+import {
   useConnectionStore,
   readinessForRun,
 } from "@/shared/stores/connectionStore";
@@ -132,9 +137,12 @@ async function triggerStart(
     selectionFromSide(connState.source),
     selectionFromSide(connState.target),
     {
-      hasBarangay:
-        srcRaw.includes("barangay_code") && tgtRaw.includes("barangay_code"),
-      hasCity: srcRaw.includes("city_code") && tgtRaw.includes("city_code"),
+      hasBarangay: bothSidesHaveGeoColumn(
+        srcRaw,
+        tgtRaw,
+        BARANGAY_CODE_HINTS,
+      ),
+      hasCity: bothSidesHaveGeoColumn(srcRaw, tgtRaw, CITY_CODE_HINTS),
     },
   );
   const parsed = parseRunConfig(draft);
