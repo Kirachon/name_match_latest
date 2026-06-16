@@ -420,7 +420,7 @@ impl Default for GpuOptionsDto {
             use_levenshtein_full_scoring: false,
             vram_budget_mb: None,
             dynamic_tuning: false,
-            fuzzy_gate_mode: GpuFuzzyGateModeDto::GateOnly,
+            fuzzy_gate_mode: GpuFuzzyGateModeDto::Off,
         }
     }
 }
@@ -428,9 +428,9 @@ impl Default for GpuOptionsDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum GpuFuzzyGateModeDto {
+    #[default]
     Off,
     Shadow,
-    #[default]
     GateOnly,
 }
 

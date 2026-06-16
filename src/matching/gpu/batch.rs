@@ -14,6 +14,7 @@
 //! - Integrates with existing OOM backoff and memory budgeting
 //! - No changes to blocking logic, GPU kernels, or post-processing
 
+use super::resident::ResidentNamePool;
 use super::FuzzyCache;
 use super::MAX_STR;
 use super::*; // Import from parent gpu module
@@ -222,6 +223,137 @@ impl GpuBatchAccumulator {
         self.pairs.is_empty()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn finish_gpu_batch_classification(
+        &self,
+        cache1: &[FuzzyCache],
+        cache2: &[FuzzyCache],
+        t1: &[Person],
+        t2: &[Person],
+        results: &mut Vec<MatchPair>,
+        allow_swap: bool,
+        stats: &mut GpuFuzzyStats,
+        gate_mode: GpuFuzzyGateMode,
+        keep_flags: Option<Vec<u8>>,
+    ) -> Result<()> {
+        let n_pairs = self.pairs.len();
+        let mut bd_pass = 0usize;
+        let mut bd_fail = 0usize;
+        let mut swap_pass = 0usize;
+        let mut swap_fail = 0usize;
+        let cpu_start = Instant::now();
+        let batch_results_before = results.len();
+        for (k, pair) in self.pairs.iter().enumerate() {
+            let gate_keep = keep_flags
+                .as_ref()
+                .map(|flags| flags.get(k).copied().unwrap_or(0) != 0)
+                .unwrap_or(true);
+            if matches!(gate_mode, GpuFuzzyGateMode::GateOnly) && !gate_keep {
+                continue;
+            }
+
+            let (bd_match, is_swap) =
+                match (t1[pair.outer_idx].birthdate, t2[pair.inner_idx].birthdate) {
+                    (Some(b1), Some(b2)) => {
+                        let stored = b1.format("%Y-%m-%d").to_string();
+                        let input = b2.format("%Y-%m-%d").to_string();
+                        let is_swap = b1 != b2;
+                        (birthdate_matches(&stored, &input, allow_swap), is_swap)
+                    }
+                    _ => (false, false),
+                };
+            if !bd_match {
+                bd_fail += 1;
+                if is_swap {
+                    swap_fail += 1;
+                }
+                continue;
+            }
+            bd_pass += 1;
+            if is_swap {
+                swap_pass += 1;
+            }
+
+            stats.cpu_classified += 1;
+            let cls = if super::gpu_no_mid_mode() {
+                super::classify_pair_cached_no_mid(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
+            } else {
+                let m1 = t1[pair.outer_idx]
+                    .middle_name
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim();
+                let m2 = t2[pair.inner_idx]
+                    .middle_name
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim();
+                let l1 = m1
+                    .trim_matches('.')
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count();
+                let l2 = m2
+                    .trim_matches('.')
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count();
+                if l1 < 2 || l2 < 2 {
+                    continue;
+                }
+                super::classify_pair_cached(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
+            };
+
+            if let Some((score, label)) = cls {
+                if matches!(gate_mode, GpuFuzzyGateMode::Shadow) && !gate_keep {
+                    stats.shadow_false_negative_count += 1;
+                    log::error!(
+                        "[GPU_GATE] Shadow false negative: id1={}, id2={}, score={:.4}, label={}",
+                        t1[pair.outer_idx].id,
+                        t2[pair.inner_idx].id,
+                        score,
+                        label
+                    );
+                }
+                results.push(MatchPair {
+                    person1: t1[pair.outer_idx].clone(),
+                    person2: t2[pair.inner_idx].clone(),
+                    confidence: score as f32,
+                    matched_fields: vec!["fuzzy".into(), label, "birthdate".into()],
+                    is_matched_infnbd: false,
+                    is_matched_infnmnbd: false,
+                });
+            } else if is_swap && gpu_batch_log_enabled() {
+                log::debug!(
+                    "[GPU_BATCH] Swap match failed classification: id1={}, id2={}, first1={:?}, first2={:?}, last1={:?}, last2={:?}",
+                    t1[pair.outer_idx].id,
+                    t2[pair.inner_idx].id,
+                    t1[pair.outer_idx].first_name,
+                    t2[pair.inner_idx].first_name,
+                    t1[pair.outer_idx].last_name,
+                    t2[pair.inner_idx].last_name
+                );
+            }
+        }
+        stats.cpu_classification_time_us += cpu_start.elapsed().as_micros();
+        stats.matches_emitted += (results.len() - batch_results_before) as u64;
+
+        if gpu_batch_log_enabled() {
+            log::info!(
+                "[GPU_BATCH] Processed {} pairs, found {} matches (mode={}, bd_pass={}, bd_fail={}, swap_pass={}, swap_fail={})",
+                n_pairs,
+                results.len() - batch_results_before,
+                gate_mode.as_str(),
+                bd_pass,
+                bd_fail,
+                swap_pass,
+                swap_fail
+            );
+        }
+
+        Ok(())
+    }
+
     /// Flush accumulated pairs to GPU for processing.
     ///
     /// This method:
@@ -273,6 +405,8 @@ impl GpuBatchAccumulator {
         func_jw: &CudaFunction,
         func_max3: &CudaFunction,
         func_gate: &CudaFunction,
+        func_gate_resident: &CudaFunction,
+        resident: Option<(&ResidentNamePool, &ResidentNamePool)>,
         _tile_max: usize,
         results: &mut Vec<MatchPair>,
         allow_swap: bool,
@@ -292,7 +426,12 @@ impl GpuBatchAccumulator {
         let n_pairs = pairs.len();
         let gate_mode = current_gpu_fuzzy_gate_mode();
         stats.pairs_uploaded += n_pairs as u64;
-        let mut use_pinned = gpu_pinned_host_enabled();
+        let use_resident = resident.is_some()
+            && matches!(
+                gate_mode,
+                GpuFuzzyGateMode::Shadow | GpuFuzzyGateMode::GateOnly
+            );
+        let mut use_pinned = gpu_pinned_host_enabled() && !use_resident;
         let mut a_total: usize = 0;
         let mut b_total: usize = 0;
         for pair in pairs {
@@ -318,6 +457,88 @@ impl GpuBatchAccumulator {
             self.force_keep.push(u8::from(
                 name1.len() > 64 || name2.len() > 64 || !name1.is_ascii() || !name2.is_ascii(),
             ));
+        }
+
+        if use_resident {
+            let (pool1, pool2) = resident.expect("resident pools present when use_resident");
+            let outer_idx: Vec<i32> = pairs.iter().map(|p| p.outer_idx as i32).collect();
+            let inner_idx: Vec<i32> = pairs.iter().map(|p| p.inner_idx as i32).collect();
+            let index_h2d_start = Instant::now();
+            let d_outer = stream.memcpy_stod(outer_idx.as_slice())?;
+            let d_inner = stream2.memcpy_stod(inner_idx.as_slice())?;
+            let d_mp_eq = stream.memcpy_stod(self.mp_eq.as_slice())?;
+            stream.synchronize()?;
+            stream2.synchronize()?;
+            let index_us = index_h2d_start.elapsed().as_micros();
+            stats.batch_index_h2d_us += index_us;
+            stats.h2d_time_us += index_us;
+
+            let gpu_props = crate::matching::gpu_config::query_gpu_properties(0).unwrap_or_else(
+                |_| crate::matching::gpu_config::GpuProperties {
+                    compute_major: 7,
+                    compute_minor: 0,
+                    sm_count: 30,
+                    max_threads_per_block: 1024,
+                    max_shared_memory_per_block: 49152,
+                },
+            );
+            let bs: u32 = crate::matching::gpu_config::calculate_optimal_block_size(
+                &gpu_props,
+                crate::matching::gpu_config::KernelType::Levenshtein,
+            );
+            let grid: u32 = ((n_pairs as u32 + bs - 1) / bs).max(1);
+            let cfg = LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (bs, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let n_i32 = n_pairs as i32;
+
+            let mut d_keep = stream.alloc_zeros::<u8>(n_pairs)?;
+            let kernel_start = Instant::now();
+            let mut gate = stream.launch_builder(func_gate_resident);
+            gate.arg(&pool1.d_bytes)
+                .arg(&pool1.d_offsets)
+                .arg(&pool1.d_lengths)
+                .arg(&pool2.d_bytes)
+                .arg(&pool2.d_offsets)
+                .arg(&pool2.d_lengths)
+                .arg(&d_outer)
+                .arg(&d_inner)
+                .arg(&d_mp_eq)
+                .arg(&mut d_keep)
+                .arg(&n_i32);
+            unsafe {
+                gate.launch(cfg)?;
+            }
+            stream.synchronize()?;
+            stats.kernel_time_us += kernel_start.elapsed().as_micros();
+            stats.gpu_kernel_launch_count += 1;
+
+            let d2h_start = Instant::now();
+            let mut flags: Vec<u8> = stream.memcpy_dtov(&d_keep)?;
+            stats.d2h_time_us += d2h_start.elapsed().as_micros();
+            for (flag, force_keep) in flags.iter_mut().zip(self.force_keep.iter()) {
+                if *force_keep != 0 {
+                    *flag = 1;
+                }
+            }
+            let keep = flags.iter().filter(|&&flag| flag != 0).count() as u64;
+            let reject = flags.len() as u64 - keep;
+            stats.gpu_gate_keep += keep;
+            stats.gpu_gate_reject += reject;
+
+            return self.finish_gpu_batch_classification(
+                cache1,
+                cache2,
+                t1,
+                t2,
+                results,
+                allow_swap,
+                stats,
+                gate_mode,
+                Some(flags),
+            );
         }
 
         let (a_bytes, a_offsets, a_lengths, b_bytes, b_offsets, b_lengths) = (
@@ -683,131 +904,16 @@ impl GpuBatchAccumulator {
             }
         }
 
-        // Post-processing: birthdate match (with optional month/day swap) + authoritative classification.
-        // PARITY FIX: Use CPU In-Memory classification logic (compare_persons_no_mid / compare_persons_new)
-        // to ensure 100% parity across all execution modes. GPU metrics are computed but not used for
-        // classification - they are recomputed by the comparison functions to match CPU In-Memory behavior.
-        let mut bd_pass = 0usize;
-        let mut bd_fail = 0usize;
-        let mut swap_pass = 0usize;
-        let mut swap_fail = 0usize;
-        let cpu_start = Instant::now();
-        let batch_results_before = results.len();
-        for (k, pair) in self.pairs.iter().enumerate() {
-            let gate_keep = keep_flags
-                .as_ref()
-                .map(|flags| flags.get(k).copied().unwrap_or(0) != 0)
-                .unwrap_or(true);
-            if matches!(gate_mode, GpuFuzzyGateMode::GateOnly) && !gate_keep {
-                continue;
-            }
-
-            // Birthdate check using birthdate_matches (supports month/day swap when allow_swap=true)
-            let (bd_match, is_swap) =
-                match (t1[pair.outer_idx].birthdate, t2[pair.inner_idx].birthdate) {
-                    (Some(b1), Some(b2)) => {
-                        let stored = b1.format("%Y-%m-%d").to_string();
-                        let input = b2.format("%Y-%m-%d").to_string();
-                        let is_swap = b1 != b2;
-                        (birthdate_matches(&stored, &input, allow_swap), is_swap)
-                    }
-                    _ => (false, false),
-                };
-            if !bd_match {
-                bd_fail += 1;
-                if is_swap {
-                    swap_fail += 1;
-                }
-                continue;
-            }
-            bd_pass += 1;
-            if is_swap {
-                swap_pass += 1;
-            }
-
-            // Use CPU In-Memory classification logic for parity
-            stats.cpu_classified += 1;
-            let cls = if super::gpu_no_mid_mode() {
-                super::classify_pair_cached_no_mid(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
-            } else {
-                // L10 PARITY FIX: Full middle name required (length >= 2 after trimming '.')
-                // This matches the CPU path in advanced_matcher.rs lines 278-292
-                let m1 = t1[pair.outer_idx]
-                    .middle_name
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim();
-                let m2 = t2[pair.inner_idx]
-                    .middle_name
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim();
-                let l1 = m1
-                    .trim_matches('.')
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .count();
-                let l2 = m2
-                    .trim_matches('.')
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .count();
-                if l1 < 2 || l2 < 2 {
-                    // Skip pairs where either middle name is too short (initial only)
-                    continue;
-                }
-                // Full-name (with middle) classification
-                super::classify_pair_cached(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
-            };
-
-            if let Some((score, label)) = cls {
-                if matches!(gate_mode, GpuFuzzyGateMode::Shadow) && !gate_keep {
-                    stats.shadow_false_negative_count += 1;
-                    log::error!(
-                        "[GPU_GATE] Shadow false negative: id1={}, id2={}, score={:.4}, label={}",
-                        t1[pair.outer_idx].id,
-                        t2[pair.inner_idx].id,
-                        score,
-                        label
-                    );
-                }
-                results.push(MatchPair {
-                    person1: t1[pair.outer_idx].clone(),
-                    person2: t2[pair.inner_idx].clone(),
-                    confidence: score as f32,
-                    matched_fields: vec!["fuzzy".into(), label, "birthdate".into()],
-                    is_matched_infnbd: false,
-                    is_matched_infnmnbd: false,
-                });
-            } else if is_swap && gpu_batch_log_enabled() {
-                // Log swap matches that fail classification
-                log::debug!(
-                    "[GPU_BATCH] Swap match failed classification: id1={}, id2={}, first1={:?}, first2={:?}, last1={:?}, last2={:?}",
-                    t1[pair.outer_idx].id,
-                    t2[pair.inner_idx].id,
-                    t1[pair.outer_idx].first_name,
-                    t2[pair.inner_idx].first_name,
-                    t1[pair.outer_idx].last_name,
-                    t2[pair.inner_idx].last_name
-                );
-            }
-        }
-        stats.cpu_classification_time_us += cpu_start.elapsed().as_micros();
-        stats.matches_emitted += (results.len() - batch_results_before) as u64;
-
-        if gpu_batch_log_enabled() {
-            log::info!(
-                "[GPU_BATCH] Processed {} pairs, found {} matches (mode={}, bd_pass={}, bd_fail={}, swap_pass={}, swap_fail={})",
-                n_pairs,
-                results.len() - batch_results_before,
-                gate_mode.as_str(),
-                bd_pass,
-                bd_fail,
-                swap_pass,
-                swap_fail
-            );
-        }
-
-        Ok(())
+        self.finish_gpu_batch_classification(
+            cache1,
+            cache2,
+            t1,
+            t2,
+            results,
+            allow_swap,
+            stats,
+            gate_mode,
+            keep_flags,
+        )
     }
 }
