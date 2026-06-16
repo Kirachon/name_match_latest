@@ -112,9 +112,18 @@ Each gate must attach: git commit, exact command, dataset manifest SHA-256, `pea
 **Import integration tests:**
 
 ```powershell
-$env:MYSQL_IMPORT_TEST_URL = "<mysql-url-for-local-test-database>"
+$env:MYSQL_IMPORT_TEST_URL = "mysql://root:root@127.0.0.1:3307/duplicate_checker"
 $env:CARGO_HOME = "D:\GitProjects\name_match_latest\.cargo-test-home"
+cargo test --test csv_import_mysql -- --ignored
+cargo test --test db_cross_session_smoke -- --ignored
 ```
+
+**Cross-session dual-pool streaming smoke (`tests/db_cross_session_smoke.rs`):**
+
+- Creates disposable `smoke_cross_a` / `smoke_cross_b` tables with paired rows.
+- Compares `stream_match_csv_dual` pair set to in-memory `match_all_with_opts` baseline.
+- Default `MYSQL_SMOKE_ROWS=1000`; set `10000` for the full G1 gate.
+- Pure Rust policy test `cross_session_policy_selects_two_pool_not_single_pool` runs without MySQL.
 
 **Match / perf (optional tuning):**
 
