@@ -92,7 +92,7 @@ Remediation-pass validation status per `docs/performance-remediation-swarm-plan.
 | Frontend tests (full suite) | PASSED | `pnpm --dir ui test` | 10 files, 49 tests passed | Includes policy, compare guard, review band, and component tests |
 | `cargo fmt --check` | BLOCKED | `cargo fmt --manifest-path src-tauri/Cargo.toml --check` | Pre-existing drift in unrelated files | Not auto-formatted to avoid broad unrelated edits |
 | Context Engine review (results.rs) | PASSED | `review_auto` on isolated `results.rs` diff | Risk 2/5, `should_fail: false` | PRE001 warning covered by focused tests |
-| Docker / MySQL smoke | PASSED | `cargo test --test db_cross_session_smoke -- --ignored` (local `matchers-mysql-1`, 1000 rows default; 10000 with `MYSQL_SMOKE_ROWS`) | Pair set + confidence parity vs in-memory baseline; policy test runs without MySQL | Gate G1/G8 |
+| Docker / MySQL smoke | PASSED | `cargo test --test db_cross_session_smoke policy`; `cargo test --test db_cross_session_smoke -- --ignored` (local `matchers-mysql-1`, 1k/10k rows) | Cross + same-session parity, memory +20% gate, cancel partial; CI job `mysql_smoke` | Gates G1–G6/G8 |
 | Two-pool streaming design | PASSED | Wrote `docs/two-pool-db-streaming-design.md` | Phase 5 design-only deliverable complete | Implementation gated; `supports_cross_session_streaming` default false |
 | Performance benchmarks (fixtures) | DEFERRED | Not run | No peak RSS / p95 evidence for `result_store_spilled_100k` ladder | Requires Phase 2 fixtures and non-Docker benchmark command |
 | Full frontend lint/build | PASSED | `pnpm --dir ui lint` and `pnpm --dir ui build` | Typecheck clean; Vite production build succeeded | Phase 6 matrix complete for UI |

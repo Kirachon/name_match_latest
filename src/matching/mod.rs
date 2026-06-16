@@ -8169,8 +8169,9 @@ where
         }
 
         // Probe join
+        let mut cancelled = false;
         if let Some(probe_hashes) = probe_hashes_opt.as_ref() {
-            for (j, &h) in probe_hashes.iter().enumerate() {
+            'probe_hash: for (j, &h) in probe_hashes.iter().enumerate() {
                 let i = probe_idx[j];
                 let p = &rows[i];
                 let n = &probe_norms[i];
@@ -8191,12 +8192,18 @@ where
                             };
                             on_match(&pair)?;
                             written += 1;
+                            if let Some(c) = &ctrl {
+                                if c.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                    cancelled = true;
+                                    break 'probe_hash;
+                                }
+                            }
                         }
                     }
                 }
             }
         } else {
-            for (i, p) in rows.iter().enumerate() {
+            'probe_cpu: for (i, p) in rows.iter().enumerate() {
                 let n = &probe_norms[i];
                 if let Some(h) = hash_key_for_np(algo, n) {
                     if let Some(cands) = index.get(&h) {
@@ -8218,11 +8225,20 @@ where
                                 };
                                 on_match(&pair)?;
                                 written += 1;
+                                if let Some(c) = &ctrl {
+                                    if c.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                        cancelled = true;
+                                        break 'probe_cpu;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+        if cancelled {
+            break;
         }
 
         // Checkpoint after processing current chunk
@@ -9030,7 +9046,12 @@ where
 
             if !gpu_done {
                 // CPU fallback: candidate window by exact birthdate
-                for p in rows.iter() {
+                'part_rows: for p in rows.iter() {
+                    if let Some(c) = &ctrl {
+                        if c.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'part_rows;
+                        }
+                    }
                     let n = normalize_person(p);
                     if let Some(d) = n.birthdate.as_ref() {
                         if let Some(cand_idx) = by_date.get(d) {
@@ -9054,39 +9075,70 @@ where
                                         continue;
                                     }
                                 }
-                                let comp = if matches!(algo, MatchingAlgorithm::FuzzyNoMiddle) {
-                                    fuzzy_compare_names_no_mid(
-                                        n.first_name.as_deref(),
-                                        n.last_name.as_deref(),
-                                        n2.first_name.as_deref(),
-                                        n2.last_name.as_deref(),
-                                    )
-                                } else {
-                                    fuzzy_compare_names_new(
-                                        n.first_name.as_deref(),
-                                        n.middle_name.as_deref(),
-                                        n.last_name.as_deref(),
-                                        n2.first_name.as_deref(),
-                                        n2.middle_name.as_deref(),
-                                        n2.last_name.as_deref(),
-                                    )
-                                };
-                                if let Some((score, label)) = comp {
-                                    let q = &inner_rows[i2];
-                                    let pair = MatchPair {
-                                        person1: if inner_is_t2 { p.clone() } else { q.clone() },
-                                        person2: if inner_is_t2 { q.clone() } else { p.clone() },
-                                        confidence: (score / 100.0) as f32,
-                                        matched_fields: vec![
-                                            "fuzzy".into(),
-                                            label,
-                                            "birthdate".into(),
-                                        ],
-                                        is_matched_infnbd: false,
-                                        is_matched_infnmnbd: false,
-                                    };
-                                    on_match(&pair)?;
-                                    total_written += 1;
+                                match algo {
+                                    MatchingAlgorithm::Fuzzy | MatchingAlgorithm::FuzzyNoMiddle => {
+                                        let comp = if matches!(algo, MatchingAlgorithm::FuzzyNoMiddle) {
+                                            fuzzy_compare_names_no_mid(
+                                                n.first_name.as_deref(),
+                                                n.last_name.as_deref(),
+                                                n2.first_name.as_deref(),
+                                                n2.last_name.as_deref(),
+                                            )
+                                        } else {
+                                            fuzzy_compare_names_new(
+                                                n.first_name.as_deref(),
+                                                n.middle_name.as_deref(),
+                                                n.last_name.as_deref(),
+                                                n2.first_name.as_deref(),
+                                                n2.middle_name.as_deref(),
+                                                n2.last_name.as_deref(),
+                                            )
+                                        };
+                                        if let Some((score, label)) = comp {
+                                            let q = &inner_rows[i2];
+                                            let pair = MatchPair {
+                                                person1: if inner_is_t2 { p.clone() } else { q.clone() },
+                                                person2: if inner_is_t2 { q.clone() } else { p.clone() },
+                                                confidence: (score / 100.0) as f32,
+                                                matched_fields: vec![
+                                                    "fuzzy".into(),
+                                                    label,
+                                                    "birthdate".into(),
+                                                ],
+                                                is_matched_infnbd: false,
+                                                is_matched_infnmnbd: false,
+                                            };
+                                            on_match(&pair)?;
+                                            total_written += 1;
+                                        }
+                                    }
+                                    MatchingAlgorithm::IdUuidYasIsMatchedInfnbd => {
+                                        if !matches_algo1(&n, n2) {
+                                            continue;
+                                        }
+                                        let q = &inner_rows[i2];
+                                        let pair = if inner_is_t2 {
+                                            to_pair(p, q, algo, &n, n2)
+                                        } else {
+                                            to_pair(q, p, algo, n2, &n)
+                                        };
+                                        on_match(&pair)?;
+                                        total_written += 1;
+                                    }
+                                    MatchingAlgorithm::IdUuidYasIsMatchedInfnmnbd => {
+                                        if !matches_algo2(&n, n2) {
+                                            continue;
+                                        }
+                                        let q = &inner_rows[i2];
+                                        let pair = if inner_is_t2 {
+                                            to_pair(p, q, algo, &n, n2)
+                                        } else {
+                                            to_pair(q, p, algo, n2, &n)
+                                        };
+                                        on_match(&pair)?;
+                                        total_written += 1;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }

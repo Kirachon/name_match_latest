@@ -122,6 +122,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check --locked --bins
 
+  mysql_smoke:
+    name: MySQL DB streaming smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: duplicate_checker
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: DB streaming policy smoke (no MySQL required)
+        run: cargo test --test db_cross_session_smoke policy -- --nocapture
+      - name: DB streaming integration smoke
+        env:
+          MYSQL_IMPORT_TEST_URL: mysql://root:root@127.0.0.1:3306/duplicate_checker
+          MYSQL_SMOKE_ROWS: "1000"
+        run: cargo test --test db_cross_session_smoke -- --ignored --nocapture --test-threads=1
+
   build_gui_cpu_windows:
     name: Build GUI (CPU, Windows)
     runs-on: windows-latest
