@@ -2,7 +2,7 @@
 
 ## Status
 
-Design-only document produced in Phase 5 of `docs/performance-remediation-swarm-plan.md`. No implementation is approved until all gates in [Implementation Gates](#implementation-gates) pass.
+Implemented behind `SUPPORTS_CROSS_SESSION_STREAMING` (default `true` in code; set `false` to roll back to in-memory cross-session fallback). Uses `stream_match_csv_dual` MVP — partitioned dual-pool remains future work.
 
 ## Problem Statement
 

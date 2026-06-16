@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   algorithmSupportsDbStreaming,
+  anyStreamingBackendActive,
   compareBlockedReason,
   crossSessionDbStreamingMessage,
+  crossSessionStreamingBackendActive,
   MAX_DIFF_ROWS,
   needsCrossSessionDbStreamingNotice,
   resolveEffectiveRunMode,
@@ -72,12 +74,14 @@ describe("runScalePolicy", () => {
     expect(streamingBackendActive(cfg)).toBe(true);
   });
 
-  it("does not activate streaming backend across different db sessions", () => {
+  it("does not activate same-session streaming backend across different db sessions", () => {
     const cfg = dbConfig(200_000, "deterministic-fn-ln-bd");
     cfg.streaming.mode = "streaming";
     cfg.target.session_id = "other-session";
 
     expect(streamingBackendActive(cfg)).toBe(false);
+    expect(crossSessionStreamingBackendActive(cfg)).toBe(true);
+    expect(anyStreamingBackendActive(cfg)).toBe(true);
   });
 
   it("blocks million-row file sources", () => {
@@ -91,10 +95,12 @@ describe("runScalePolicy", () => {
     expect(compareBlockedReason(MAX_DIFF_ROWS + 1, 1)).not.toBeNull();
   });
 
-  it("surfaces cross-session streaming policy copy", () => {
+  it("surfaces cross-session streaming when capability is on", () => {
     expect(crossSessionDbStreamingMessage()).toContain("same DB session");
     const cfg = dbConfig(150_000, "deterministic-fn-ln-bd");
     cfg.target.session_id = "other-session";
-    expect(needsCrossSessionDbStreamingNotice(cfg)).toBe(true);
+    cfg.streaming.mode = "streaming";
+    expect(crossSessionStreamingBackendActive(cfg)).toBe(true);
+    expect(needsCrossSessionDbStreamingNotice(cfg)).toBe(false);
   });
 });

@@ -14,6 +14,9 @@ pub const DIFF_TOO_LARGE_MESSAGE: &str = "This comparison is too large to load s
 pub const LARGE_RESULTS_BANNER_ROWS: u64 = 100_000;
 pub const LARGE_RESULTS_DEFAULT_PAGE_SIZE: u32 = 50;
 
+/// Cross-session dual-pool DB streaming. Set false to fall back to in-memory loader.
+pub const SUPPORTS_CROSS_SESSION_STREAMING: bool = true;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectiveRunMode {
     InMemory,
@@ -71,11 +74,8 @@ pub fn is_same_db_session(config: &RunConfigDto) -> bool {
     config.source.session_id == config.target.session_id
 }
 
-pub fn should_use_db_streaming_worker(config: &RunConfigDto) -> bool {
+fn db_streaming_eligible_ignoring_session(config: &RunConfigDto) -> bool {
     if !is_db_to_db(config) {
-        return false;
-    }
-    if !is_same_db_session(config) {
         return false;
     }
     if config.cascade.as_ref().is_some_and(|c| c.enabled) {
@@ -90,6 +90,28 @@ pub fn should_use_db_streaming_worker(config: &RunConfigDto) -> bool {
         resolve_effective_run_mode(config, source_rows, target_rows),
         EffectiveRunMode::Streaming
     )
+}
+
+pub fn should_use_db_streaming_worker(config: &RunConfigDto) -> bool {
+    db_streaming_eligible_ignoring_session(config) && is_same_db_session(config)
+}
+
+pub fn should_use_two_pool_db_streaming_worker(config: &RunConfigDto) -> bool {
+    if !SUPPORTS_CROSS_SESSION_STREAMING {
+        return false;
+    }
+    if !db_streaming_eligible_ignoring_session(config) {
+        return false;
+    }
+    if is_same_db_session(config) {
+        return false;
+    }
+    // Dual-pool MVP uses standard table columns; custom mappings require in-memory load.
+    config.source.column_mapping.is_none() && config.target.column_mapping.is_none()
+}
+
+pub fn should_use_any_db_streaming_worker(config: &RunConfigDto) -> bool {
+    should_use_db_streaming_worker(config) || should_use_two_pool_db_streaming_worker(config)
 }
 
 pub fn scale_block_reason(config: &RunConfigDto) -> Option<ScaleBlockReason> {
@@ -182,6 +204,50 @@ mod tests {
         cfg.target.session_id = "other-session".into();
 
         assert!(!should_use_db_streaming_worker(&cfg));
+    }
+
+    #[test]
+    fn two_pool_worker_activates_for_cross_session_streaming() {
+        let mut cfg = db_config(
+            150_000,
+            RunModeDto::Streaming,
+            AlgorithmDto::DeterministicFnLnBd,
+        );
+        cfg.target.session_id = "other-session".into();
+
+        assert!(should_use_two_pool_db_streaming_worker(&cfg));
+        assert!(should_use_any_db_streaming_worker(&cfg));
+    }
+
+    #[test]
+    fn two_pool_worker_not_used_for_same_session() {
+        let cfg = db_config(
+            150_000,
+            RunModeDto::Streaming,
+            AlgorithmDto::DeterministicFnLnBd,
+        );
+
+        assert!(should_use_db_streaming_worker(&cfg));
+        assert!(!should_use_two_pool_db_streaming_worker(&cfg));
+    }
+
+    #[test]
+    fn two_pool_worker_skips_custom_column_mapping() {
+        let mut cfg = db_config(
+            150_000,
+            RunModeDto::Streaming,
+            AlgorithmDto::DeterministicFnLnBd,
+        );
+        cfg.target.session_id = "other-session".into();
+        cfg.source.column_mapping = Some(crate::models::ColumnMapping {
+            id: "id".into(),
+            first_name: "first_name".into(),
+            last_name: "last_name".into(),
+            birthdate: "birthdate".into(),
+            ..Default::default()
+        });
+
+        assert!(!should_use_two_pool_db_streaming_worker(&cfg));
     }
 
     #[test]

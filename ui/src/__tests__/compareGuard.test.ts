@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   compareBlockedReason,
   crossSessionDbStreamingMessage,
+  crossSessionStreamingBackendActive,
   DIFF_TOO_LARGE_MESSAGE,
   MAX_DIFF_ROWS,
   needsCrossSessionDbStreamingNotice,
+  SUPPORTS_CROSS_SESSION_STREAMING,
 } from "@/shared/runScalePolicy";
 import type { RunConfigDto } from "@/shared/tauri/types";
 
@@ -74,10 +76,12 @@ describe("cross-session DB streaming notice", () => {
     expect(crossSessionDbStreamingMessage()).toContain("same DB session");
   });
 
-  it("is shown for large cross-session deterministic DB runs", () => {
+  it("activates cross-session streaming when capability is enabled", () => {
     const cfg = dbConfig(200_000, "deterministic-fn-ln-bd");
     cfg.streaming.mode = "streaming";
-    expect(needsCrossSessionDbStreamingNotice(cfg)).toBe(true);
+    expect(SUPPORTS_CROSS_SESSION_STREAMING).toBe(true);
+    expect(crossSessionStreamingBackendActive(cfg)).toBe(true);
+    expect(needsCrossSessionDbStreamingNotice(cfg)).toBe(false);
   });
 
   it("is hidden for same-session DB runs", () => {

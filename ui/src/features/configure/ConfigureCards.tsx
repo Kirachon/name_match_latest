@@ -21,7 +21,9 @@ import {
 } from "@/shared/tauri/types";
 import { cx, formatNumber } from "@/shared/lib/format";
 import {
+  anyStreamingBackendActive,
   crossSessionDbStreamingMessage,
+  crossSessionStreamingBackendActive,
   maxSideRows,
   needsCrossSessionDbStreamingNotice,
   resolveEffectiveRunMode,
@@ -393,7 +395,7 @@ export function StreamingCard() {
   const srcRows = rowCountForSide(srcSel);
   const tgtRows = rowCountForSide(tgtSel);
   const effective = resolveEffectiveRunMode(s.mode, srcRows, tgtRows);
-  const backendActive = streamingBackendActive({
+  const streamingCfg = {
     source: srcSel,
     target: tgtSel,
     streaming: s,
@@ -406,22 +408,12 @@ export function StreamingCard() {
       has_barangay_code: false,
       has_city_code: false,
     },
-  });
+  };
+  const backendActive = streamingBackendActive(streamingCfg);
+  const crossSessionActive = crossSessionStreamingBackendActive(streamingCfg);
+  const anyStreamingActive = anyStreamingBackendActive(streamingCfg);
   const warn = scaleWarningLevel(Math.max(srcRows, tgtRows));
-  const crossSessionNotice = needsCrossSessionDbStreamingNotice({
-    source: srcSel,
-    target: tgtSel,
-    streaming: s,
-    algorithm,
-    cascade: {
-      enabled: mode === "deep",
-      levels: cascade.levels,
-      fuzzy_threshold: cascade.fuzzy_threshold,
-      exclusion_mode: cascade.exclusion_mode,
-      has_barangay_code: false,
-      has_city_code: false,
-    },
-  });
+  const crossSessionNotice = needsCrossSessionDbStreamingNotice(streamingCfg);
   return (
     <Card>
       <SectionHeader
@@ -436,9 +428,13 @@ export function StreamingCard() {
           <span className="text-ink-400">Effective mode:</span> {effective}
           {backendActive
             ? " (partitioned DB streaming active for algorithms 1–2)"
-            : effective === "streaming"
-              ? " (configured only — full streaming not active for this source/algorithm)"
-              : ""}
+            : crossSessionActive
+              ? " (cross-session dual-pool DB streaming active for algorithms 1–2)"
+              : anyStreamingActive
+                ? " (DB streaming active)"
+                : effective === "streaming"
+                  ? " (configured only — full streaming not active for this source/algorithm)"
+                  : ""}
         </p>
         {warn !== "none" && (
           <p className="text-amber-200/90">

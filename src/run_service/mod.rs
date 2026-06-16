@@ -479,12 +479,17 @@ fn run_worker(
 ) {
     let sink_ref: &dyn EventSink = sink.as_ref();
     if let Some(runner) = stream_runner {
-        if scale::should_use_db_streaming_worker(&config) {
+        if scale::should_use_any_db_streaming_worker(&config) {
+            let streaming_label = if scale::should_use_two_pool_db_streaming_worker(&config) {
+                "Effective mode: streaming (cross-session dual-pool DB load)"
+            } else {
+                "Effective mode: streaming (partitioned DB load)"
+            };
             sink.emit_log(LogEntryDto {
                 job_id: job_id.clone(),
                 timestamp_ms: now_ms(),
                 level: LogLevelDto::Info,
-                message: "Effective mode: streaming (partitioned DB load)".into(),
+                message: streaming_label.into(),
             });
             let _ = store.enable_spill_mode(&job_id);
             set_state(

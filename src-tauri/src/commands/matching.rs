@@ -108,6 +108,7 @@ pub async fn start_matching(
     let store = Arc::clone(&state.results);
     let src_pool_loader = src_pool.clone();
     let src_pool_stream = src_pool.clone();
+    let tgt_pool_stream = tgt_pool.clone();
 
     // Loader closure runs on the worker thread. We block_on a private tokio
     // runtime just for the load step so we don't need a tokio handle from the
@@ -137,8 +138,9 @@ pub async fn start_matching(
     );
 
     let stream_runner: Option<DbStreamRunner> =
-        if scale::should_use_db_streaming_worker(&config) {
+        if scale::should_use_any_db_streaming_worker(&config) {
             let src = src_pool_stream.expect("source pool for streaming");
+            let tgt = tgt_pool_stream.expect("target pool for cross-session streaming");
             let job_sink = Arc::clone(&sink);
             Some(Arc::new(
                 move |run_config: &RunConfigDto,
@@ -152,15 +154,6 @@ pub async fn start_matching(
                         .map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
                     let algo = run_config.algorithm.to_engine();
                     let scfg = scale::streaming_config_from_dto(&run_config.streaming);
-                    let strategy = run_config
-                        .streaming
-                        .partition_strategy
-                        .clone()
-                        .unwrap_or_else(|| "last_initial".to_string());
-                    let part_cfg = PartitioningConfig {
-                        strategy,
-                        enabled: true,
-                    };
                     let next_row_id = AtomicU64::new(0);
                     let job_id_owned = job_id.to_string();
                     let cancel_flag = cancel.clone();
@@ -169,49 +162,74 @@ pub async fn start_matching(
                     let matches_found = Arc::new(AtomicU64::new(0));
                     let matches_found_progress = Arc::clone(&matches_found);
                     let mut pending_rows = Vec::with_capacity(1_000);
-                    let count = rt.block_on(name_matcher::matching::stream_match_csv_partitioned(
-                        &src,
-                        &run_config.source.table,
-                        &run_config.target.table,
-                        algo,
-                        |pair| {
-                            if cancel_flag.is_cancelled() {
-                                anyhow::bail!("__name_match_cancelled__");
-                            }
-                            let row_id = next_row_id.fetch_add(1, Ordering::Relaxed);
-                            let dto = name_matcher::run_service::match_pair_to_dto(row_id, pair);
-                            pending_rows.push(dto);
-                            if pending_rows.len() >= 1_000 {
-                                store.append_result_rows(&job_id_owned, &pending_rows)?;
-                                pending_rows.clear();
-                            }
-                            matches_found.fetch_add(1, Ordering::Relaxed);
-                            Ok(())
-                        },
-                        scfg,
-                        move |u: ProgressUpdate| {
-                            job_sink.emit_progress(ProgressEventDto {
-                                job_id: progress_job_id.clone(),
-                                state: JobStateDto::Running,
-                                stage: PipelineStageDto::Match,
-                                processed: u.processed as u64,
-                                total: u.total as u64,
-                                percent: u.percent.clamp(0.0, 100.0),
-                                eta_secs: u.eta_secs,
-                                mem_used_mb: u.mem_used_mb,
-                                mem_avail_mb: u.mem_avail_mb,
-                                gpu_total_mb: u.gpu_total_mb,
-                                gpu_free_mb: u.gpu_free_mb,
-                                gpu_active: u.gpu_active,
-                                records_per_sec: 0.0,
-                                matches_found: matches_found_progress.load(Ordering::Relaxed),
-                            });
-                        },
-                        None,
-                        run_config.source.column_mapping.as_ref(),
-                        run_config.target.column_mapping.as_ref(),
-                        part_cfg,
-                    ))?;
+                    let on_match = |pair: &name_matcher::matching::MatchPair| {
+                        if cancel_flag.is_cancelled() {
+                            anyhow::bail!("__name_match_cancelled__");
+                        }
+                        let row_id = next_row_id.fetch_add(1, Ordering::Relaxed);
+                        let dto = name_matcher::run_service::match_pair_to_dto(row_id, pair);
+                        pending_rows.push(dto);
+                        if pending_rows.len() >= 1_000 {
+                            store.append_result_rows(&job_id_owned, &pending_rows)?;
+                            pending_rows.clear();
+                        }
+                        matches_found.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    };
+                    let on_progress = move |u: ProgressUpdate| {
+                        job_sink.emit_progress(ProgressEventDto {
+                            job_id: progress_job_id.clone(),
+                            state: JobStateDto::Running,
+                            stage: PipelineStageDto::Match,
+                            processed: u.processed as u64,
+                            total: u.total as u64,
+                            percent: u.percent.clamp(0.0, 100.0),
+                            eta_secs: u.eta_secs,
+                            mem_used_mb: u.mem_used_mb,
+                            mem_avail_mb: u.mem_avail_mb,
+                            gpu_total_mb: u.gpu_total_mb,
+                            gpu_free_mb: u.gpu_free_mb,
+                            gpu_active: u.gpu_active,
+                            records_per_sec: 0.0,
+                            matches_found: matches_found_progress.load(Ordering::Relaxed),
+                        });
+                    };
+                    let count = if scale::should_use_two_pool_db_streaming_worker(run_config) {
+                        rt.block_on(name_matcher::matching::stream_match_csv_dual(
+                            &src,
+                            &tgt,
+                            &run_config.source.table,
+                            &run_config.target.table,
+                            algo,
+                            on_match,
+                            scfg,
+                            on_progress,
+                            None,
+                        ))?
+                    } else {
+                        let strategy = run_config
+                            .streaming
+                            .partition_strategy
+                            .clone()
+                            .unwrap_or_else(|| "last_initial".to_string());
+                        let part_cfg = PartitioningConfig {
+                            strategy,
+                            enabled: true,
+                        };
+                        rt.block_on(name_matcher::matching::stream_match_csv_partitioned(
+                            &src,
+                            &run_config.source.table,
+                            &run_config.target.table,
+                            algo,
+                            on_match,
+                            scfg,
+                            on_progress,
+                            None,
+                            run_config.source.column_mapping.as_ref(),
+                            run_config.target.column_mapping.as_ref(),
+                            part_cfg,
+                        ))?
+                    };
                     if !pending_rows.is_empty() {
                         store.append_result_rows(&job_id_owned, &pending_rows)?;
                     }

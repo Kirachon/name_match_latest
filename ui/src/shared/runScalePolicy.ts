@@ -13,6 +13,9 @@ export const LARGE_RESULTS_DEFAULT_PAGE_SIZE = 50;
 export const MAX_DIFF_ROWS = 100_000;
 export const MAX_XLSX_EXPORT_ROWS = 100_000;
 
+/** Cross-session dual-pool DB streaming. Must mirror backend `SUPPORTS_CROSS_SESSION_STREAMING`. */
+export const SUPPORTS_CROSS_SESSION_STREAMING = true;
+
 export const DIFF_TOO_LARGE_MESSAGE =
   "This comparison is too large to load safely in memory. Export both runs as CSV and compare externally, or rerun with narrower filters.";
 
@@ -132,6 +135,31 @@ export function streamingBackendActive(config: DbStreamingConfig): boolean {
   return dbStreamingEligibleIgnoringSession(config) && sameDbSession(config);
 }
 
+export function crossSessionStreamingBackendActive(
+  config: DbStreamingConfig & {
+    source: Pick<TableSelectionDto, "column_mapping">;
+    target: Pick<TableSelectionDto, "column_mapping">;
+  },
+): boolean {
+  if (!SUPPORTS_CROSS_SESSION_STREAMING) return false;
+  if (!dbStreamingEligibleIgnoringSession(config)) return false;
+  if (sameDbSession(config)) return false;
+  if (config.source.column_mapping || config.target.column_mapping) return false;
+  return true;
+}
+
+export function anyStreamingBackendActive(
+  config: DbStreamingConfig & {
+    source: Pick<TableSelectionDto, "column_mapping">;
+    target: Pick<TableSelectionDto, "column_mapping">;
+  },
+): boolean {
+  return (
+    streamingBackendActive(config) ||
+    crossSessionStreamingBackendActive(config)
+  );
+}
+
 export function compareBlockedReason(
   baseMatches: number,
   compareMatches: number,
@@ -147,9 +175,14 @@ export function crossSessionDbStreamingMessage(): string {
 }
 
 export function needsCrossSessionDbStreamingNotice(
-  config: DbStreamingConfig,
+  config: DbStreamingConfig & {
+    source: Pick<TableSelectionDto, "column_mapping">;
+    target: Pick<TableSelectionDto, "column_mapping">;
+  },
 ): boolean {
   return (
-    dbStreamingEligibleIgnoringSession(config) && !sameDbSession(config)
+    dbStreamingEligibleIgnoringSession(config) &&
+    !sameDbSession(config) &&
+    !crossSessionStreamingBackendActive(config)
   );
 }
