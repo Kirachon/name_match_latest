@@ -68,13 +68,18 @@ pass through CPU fallback.
   and opt-in runs.
 - Keep legacy kernels available for audit/regression mode.
 
-### Stage 6: GPU-resident name tables
+### Stage 6: GPU-resident name tables — **done**
 
-- First build and upload resident name buffers while legacy per-pair staging
-  remains available.
-- Then add index-pair gate kernel path behind an env flag.
-- Remove old per-pair byte buffers only after parity and instrumentation prove
-  the resident path is stable.
+- `ResidentNamePool` in `src/matching/gpu/resident.rs` uploads both table sides once
+  per L10/L11 fuzzy run; batches send only pair indices to
+  `fuzzy_gate_kernel_resident`.
+- Legacy per-pair string staging remains when `NAME_MATCHER_GPU_RESIDENT_TABLES=0`,
+  gate mode is Off, or resident upload exceeds 30% of VRAM budget / OOMs.
+- Default: resident tables **on** (opt out with `NAME_MATCHER_GPU_RESIDENT_TABLES=0`);
+  fuzzy gate default **Off** until explicit Shadow/GateOnly rollout. Batch VRAM reserve
+  applies only after a successful resident upload (not on estimate alone).
+- Parity gates: shadow `false_negative_count == 0`, candidate-set equality vs
+  batch-copy path, CI job `gpu_resident_parity` on self-hosted CUDA runner.
 
 ## Tests And Gates
 

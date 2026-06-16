@@ -190,3 +190,18 @@ jobs:
         with:
           name: gui-windows-gpu
           path: target/release/gui.exe
+
+  gpu_resident_parity:
+    name: GPU resident tables parity
+    runs-on: [self-hosted, windows, cuda]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify nvcc
+        run: nvcc --version
+      - name: GPU resident + gate parity tests
+        run: |
+          cargo test --locked --features gpu gpu_resident -- --nocapture
+          cargo test --locked --features gpu gpu_fuzzy_gate -- --nocapture
+          cargo test --locked --features gpu test_calculate_gpu_memory_budget_with_reserve

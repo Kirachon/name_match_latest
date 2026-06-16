@@ -37,7 +37,6 @@ impl ResidentNamePool {
     }
 
     pub fn build(
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
         caches: &[FuzzyCache],
         use_no_mid: bool,
@@ -86,18 +85,24 @@ impl ResidentNamePool {
     }
 }
 
-/// Build both resident pools when enabled and within VRAM budget; otherwise None.
+/// VRAM megabytes occupied by uploaded resident pools (ceil of actual bytes).
+pub fn actual_resident_pair_mb(pool1: &ResidentNamePool, pool2: &ResidentNamePool) -> u64 {
+    let bytes = pool1.byte_len + pool2.byte_len;
+    if bytes == 0 {
+        0
+    } else {
+        ((bytes as u64) + 1024 * 1024 - 1) / (1024 * 1024)
+    }
+}
+
+/// Build both resident pools when within VRAM budget; otherwise None (legacy staging).
 pub fn try_build_resident_pair(
-    ctx: &Arc<CudaContext>,
+    _ctx: &Arc<CudaContext>,
     stream: &Arc<CudaStream>,
     cache1: &[FuzzyCache],
     cache2: &[FuzzyCache],
     budget_mb: u64,
 ) -> Result<Option<(ResidentNamePool, ResidentNamePool, u128)>> {
-    if !crate::matching::gpu_resident_tables_enabled() {
-        return Ok(None);
-    }
-
     let use_no_mid = super::gpu_no_mid_mode();
     let est1 = ResidentNamePool::estimate_host_bytes(cache1, use_no_mid);
     let est2 = ResidentNamePool::estimate_host_bytes(cache2, use_no_mid);
@@ -114,14 +119,14 @@ pub fn try_build_resident_pair(
     }
 
     let upload_start = Instant::now();
-    let pool1 = match ResidentNamePool::build(ctx, stream, cache1, use_no_mid) {
+    let pool1 = match ResidentNamePool::build(stream, cache1, use_no_mid) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("[GPU_RESIDENT] pool1 upload failed ({}); using legacy staging", e);
             return Ok(None);
         }
     };
-    let pool2 = match ResidentNamePool::build(ctx, stream, cache2, use_no_mid) {
+    let pool2 = match ResidentNamePool::build(stream, cache2, use_no_mid) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("[GPU_RESIDENT] pool2 upload failed ({}); using legacy staging", e);

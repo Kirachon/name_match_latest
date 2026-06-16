@@ -20,6 +20,17 @@ use anyhow::Result;
 /// # Returns
 /// Recommended memory budget in MB
 pub fn calculate_gpu_memory_budget(total_mb: u64, free_mb: u64, aggressive: bool) -> u64 {
+    calculate_gpu_memory_budget_with_reserve(total_mb, free_mb, aggressive, 0)
+}
+
+/// Like [`calculate_gpu_memory_budget`] but subtracts an additional resident-table
+/// reservation (already-uploaded name pools) from free VRAM before sizing batches.
+pub fn calculate_gpu_memory_budget_with_reserve(
+    total_mb: u64,
+    free_mb: u64,
+    aggressive: bool,
+    reserve_resident_mb: u64,
+) -> u64 {
     // Adaptive reserve based on total VRAM
     let reserve_mb = match total_mb {
         t if t >= 16384 => 1024, // ≥16 GB: reserve 1 GB
@@ -30,7 +41,9 @@ pub fn calculate_gpu_memory_budget(total_mb: u64, free_mb: u64, aggressive: bool
 
     // Use 75% (normal) or 85% (aggressive) of free VRAM
     let usage_fraction = if aggressive { 0.85 } else { 0.75 };
-    let usable_mb = free_mb.saturating_sub(reserve_mb);
+    let usable_mb = free_mb
+        .saturating_sub(reserve_mb)
+        .saturating_sub(reserve_resident_mb);
     let budget = ((usable_mb as f64) * usage_fraction) as u64;
 
     // Clamp to reasonable range
@@ -269,6 +282,25 @@ mod tests {
         let normal = calculate_gpu_memory_budget(8192, 7000, false);
         let aggressive = calculate_gpu_memory_budget(8192, 7000, true);
         assert!(aggressive > normal, "Aggressive mode should use more VRAM");
+    }
+
+    #[test]
+    fn test_calculate_gpu_memory_budget_with_reserve() {
+        let base = calculate_gpu_memory_budget(8192, 7000, false);
+        let with_resident = calculate_gpu_memory_budget_with_reserve(8192, 7000, false, 109);
+        assert!(
+            with_resident < base,
+            "resident reserve should reduce budget: base={} reserved={}",
+            base,
+            with_resident
+        );
+        // 109 MB reserve subtracted from free before 75% fraction
+        let expected = ((7000_u64.saturating_sub(512).saturating_sub(109)) as f64 * 0.75) as u64;
+        assert_eq!(
+            with_resident,
+            expected.clamp(256, 8192 - 512),
+            "budget with 109 MB reserve should match formula"
+        );
     }
 
     #[test]

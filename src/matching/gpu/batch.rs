@@ -426,11 +426,8 @@ impl GpuBatchAccumulator {
         let n_pairs = pairs.len();
         let gate_mode = current_gpu_fuzzy_gate_mode();
         stats.pairs_uploaded += n_pairs as u64;
-        let use_resident = resident.is_some()
-            && matches!(
-                gate_mode,
-                GpuFuzzyGateMode::Shadow | GpuFuzzyGateMode::GateOnly
-            );
+        let use_resident =
+            resident.is_some() && crate::matching::resident_tables_requested(gate_mode);
         let mut use_pinned = gpu_pinned_host_enabled() && !use_resident;
         let mut a_total: usize = 0;
         let mut b_total: usize = 0;

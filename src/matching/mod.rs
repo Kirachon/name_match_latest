@@ -2040,6 +2040,15 @@ pub fn gpu_resident_tables_enabled() -> bool {
     true
 }
 
+#[inline]
+pub fn resident_tables_requested(gate_mode: GpuFuzzyGateMode) -> bool {
+    gpu_resident_tables_enabled()
+        && matches!(
+            gate_mode,
+            GpuFuzzyGateMode::Shadow | GpuFuzzyGateMode::GateOnly
+        )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GpuFuzzyStats {
     pub input_rows_left: u64,
@@ -3548,7 +3557,7 @@ mod gpu {
     "#;
     // Per-person cache to avoid repeated normalization and metaphone encoding during GPU post-processing
     #[derive(Clone)]
-    struct FuzzyCache {
+    pub(crate) struct FuzzyCache {
         simple_full: String,
         simple_full_no_mid: String,
         simple_first: String,
@@ -5562,7 +5571,10 @@ mod gpu {
         }
 
         // 4) Tile candidates to respect memory budget - use adaptive budget if not explicitly set
-        let mem_budget_mb = match opts.gpu.and_then(|g| {
+        let gate_mode_for_resident = current_gpu_fuzzy_gate_mode();
+        let want_resident = resident_tables_requested(gate_mode_for_resident);
+
+        let base_budget_mb = match opts.gpu.and_then(|g| {
             if g.mem_budget_mb > 0 {
                 Some(g.mem_budget_mb)
             } else {
@@ -5571,8 +5583,6 @@ mod gpu {
         }) {
             Some(explicit_budget) => explicit_budget,
             None => {
-                // Auto-calculate adaptive budget (75% of free VRAM, conservative)
-
                 let budget = super::gpu_config::calculate_gpu_memory_budget(
                     gpu_total_mb,
                     gpu_free_mb_init,
@@ -5586,6 +5596,31 @@ mod gpu {
                 budget
             }
         };
+
+        let resident_holder = if want_resident {
+            resident::try_build_resident_pair(ctx_arc, stream, &cache1, &cache2, base_budget_mb)?
+        } else {
+            None
+        };
+        let resident_reserve_mb = resident_holder
+            .as_ref()
+            .map(|(pool1, pool2, _)| resident::actual_resident_pair_mb(pool1, pool2))
+            .unwrap_or(0);
+        let mem_budget_mb = if resident_reserve_mb > 0 {
+            base_budget_mb
+                .saturating_sub(resident_reserve_mb)
+                .max(256)
+        } else {
+            base_budget_mb
+        };
+        if resident_reserve_mb > 0 {
+            log::info!(
+                "[GPU] Batch memory budget after resident upload: {} MB (base={} MB, resident={} MB)",
+                mem_budget_mb,
+                base_budget_mb,
+                resident_reserve_mb
+            );
+        }
         // Rough bytes per pair: two strings up to 64 bytes + offsets/len + output ~ 256 bytes
         let approx_bpp: usize = 256;
 
@@ -5635,16 +5670,6 @@ mod gpu {
             tile_max = dyn_tile.max(1);
         }
 
-        let gate_mode_for_resident = current_gpu_fuzzy_gate_mode();
-        let resident_holder = if gpu_resident_tables_enabled()
-            && matches!(
-                gate_mode_for_resident,
-                GpuFuzzyGateMode::Shadow | GpuFuzzyGateMode::GateOnly
-            ) {
-            resident::try_build_resident_pair(ctx_arc, stream, &cache1, &cache2, mem_budget_mb)?
-        } else {
-            None
-        };
         let resident_arg = resident_holder
             .as_ref()
             .map(|(pool1, pool2, _upload_us)| (pool1, pool2));
@@ -5950,7 +5975,7 @@ mod gpu {
             String::new()
         };
         log::info!(
-            "[GPU_FUZZY_STATS] mode={} rows=({},{}) candidates={} uploaded={} keep={} reject={} cpu_classified={} matches={} false_negatives={} kernels={} h2d_us={} kernel_us={} d2h_us={} cpu_us={} total_us={}{}",
+            "[GPU_FUZZY_STATS] mode={} rows=({},{}) candidates={} uploaded={} keep={} reject={} cpu_classified={} matches={} false_negatives={} kernels={} h2d_us={} kernel_us={} h2d_kernel_ratio={:.3} d2h_us={} cpu_us={} total_us={}{}",
             gate_mode.as_str(),
             stats.input_rows_left,
             stats.input_rows_right,
@@ -5964,6 +5989,11 @@ mod gpu {
             stats.gpu_kernel_launch_count,
             stats.h2d_time_us,
             stats.kernel_time_us,
+            if stats.kernel_time_us > 0 {
+                stats.h2d_time_us as f64 / stats.kernel_time_us as f64
+            } else {
+                0.0
+            },
             stats.d2h_time_us,
             stats.cpu_classification_time_us,
             stats.total_wall_time_us,
@@ -6012,7 +6042,9 @@ mod tests {
     #[cfg(feature = "gpu")]
     use crate::matching::gpu::match_fuzzy_gpu;
     use chrono::NaiveDate;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
+    #[cfg(feature = "gpu")]
+    use std::sync::OnceLock;
 
     #[cfg(feature = "gpu")]
     fn gpu_env_lock() -> &'static Mutex<()> {
@@ -6416,6 +6448,9 @@ mod tests {
     #[cfg(feature = "gpu")]
     #[test]
     fn gpu_resident_tables_match_legacy_gate_output_l10() {
+        let _env_guard = gpu_env_lock()
+            .lock()
+            .expect("gpu env test lock poisoned");
         crate::matching::gpu::GpuFuzzyContext::get()
             .expect("required GPU test: CUDA fuzzy context must be available");
 
@@ -6494,6 +6529,72 @@ mod tests {
             resident_stats.gpu_gate_keep + resident_stats.gpu_gate_reject,
             resident_stats.pairs_uploaded
         );
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_resident_tables_rebuild_pool_per_dataset() {
+        let _env_guard = gpu_env_lock()
+            .lock()
+            .expect("gpu env test lock poisoned");
+        crate::matching::gpu::GpuFuzzyContext::get()
+            .expect("required GPU test: CUDA fuzzy context must be available");
+
+        struct ResidentTablesEnv;
+        impl Drop for ResidentTablesEnv {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("NAME_MATCHER_GPU_RESIDENT_TABLES");
+                }
+            }
+        }
+        unsafe {
+            std::env::set_var("NAME_MATCHER_GPU_RESIDENT_TABLES", "1");
+        }
+        let _resident_env = ResidentTablesEnv;
+
+        let opts = MatchOptions {
+            backend: ComputeBackend::Gpu,
+            gpu: Some(GpuConfig {
+                device_id: None,
+                mem_budget_mb: 512,
+            }),
+            progress: ProgressConfig::default(),
+            allow_birthdate_swap: false,
+        };
+
+        let a1 = vec![p(1, "Maria", Some("Clara"), "Santos", (1990, 1, 1))];
+        let b1 = vec![p(101, "Maria", Some("Clara"), "Santoz", (1990, 1, 1))];
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::GateOnly);
+        let run1 = match_fuzzy_gpu(&a1, &b1, opts.clone(), &|_u: ProgressUpdate| {})
+            .expect("dataset A resident run");
+        let stats1 = last_gpu_fuzzy_stats().expect("dataset A stats");
+        assert!(stats1.resident_tables_enabled);
+
+        let a2 = vec![
+            p(1, "Maria", Some("Clara"), "Santos", (1990, 1, 1)),
+            p(2, "Roberto", Some("Miguel"), "Reyes", (1990, 1, 1)),
+        ];
+        let b2 = vec![
+            p(101, "Maria", Some("Clara"), "Santoz", (1990, 1, 1)),
+            p(102, "Mzzzzzz", Some("Qqqqq"), "Santos", (1990, 1, 1)),
+            p(103, "Rzzzzzz", Some("Qqqqq"), "Reyes", (1990, 1, 1)),
+        ];
+        let cpu2 = match_fuzzy_cpu_gpu_equivalent(&a2, &b2, &|_u: ProgressUpdate| {});
+        let run2 = match_fuzzy_gpu(&a2, &b2, opts, &|_u: ProgressUpdate| {})
+            .expect("dataset B resident run without CUDA reinit");
+        let stats2 = last_gpu_fuzzy_stats().expect("dataset B stats");
+        set_gpu_fuzzy_gate_mode(GpuFuzzyGateMode::Off);
+
+        assert!(stats2.resident_tables_enabled);
+        assert_ne!(stats1.resident_table_bytes, 0);
+        assert_ne!(stats2.resident_table_bytes, 0);
+        assert!(
+            stats2.resident_table_bytes > stats1.resident_table_bytes,
+            "dataset B should allocate a larger resident pool than dataset A"
+        );
+        assert_eq!(canonical_pairs(&run1).len(), 1);
+        assert_eq!(canonical_pairs(&run2), canonical_pairs(&cpu2));
     }
 
     #[test]
