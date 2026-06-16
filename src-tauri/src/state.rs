@@ -85,18 +85,11 @@ impl AppState {
             .path()
             .app_data_dir()
             .ok()
-            .and_then(|dir| {
-                ResultStore::with_sqlite_path(
-                    ResultStoreConfig::default(),
-                    dir.join("result_store.sqlite3"),
-                )
-                .map_err(|err| {
-                    log::error!("SQLite result store unavailable; using memory only: {err}");
-                    err
-                })
-                .ok()
-            })
-            .unwrap_or_else(ResultStore::new);
+            .map(|dir| ResultStore::open_at(ResultStoreConfig::default(), &dir))
+            .unwrap_or_else(|| {
+                log::warn!("app data dir unavailable; result store is memory-only");
+                ResultStore::new()
+            });
         Self {
             app_handle,
             db: DbRegistry::default(),

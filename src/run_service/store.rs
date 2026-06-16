@@ -17,7 +17,7 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,10 +45,15 @@ pub struct StoredJob {
     pub spilled: bool,
 }
 
+type DecisionKey = (String, i64, i64);
+
 pub struct ResultStore {
     inner: Mutex<HashMap<String, StoredJob>>,
     config: ResultStoreConfig,
     sqlite: Option<SqliteStore>,
+    /// Lightweight sidecar so review decisions survive a broken or huge results DB.
+    decisions_sqlite: Option<DecisionsSqliteStore>,
+    decisions_memory: Mutex<HashMap<DecisionKey, ReviewDecisionDto>>,
 }
 
 /// Filters applied when exporting match rows (confidence, cascade levels, review rejections).
@@ -74,15 +79,68 @@ impl ResultStore {
             inner: Mutex::new(HashMap::new()),
             config,
             sqlite: None,
+            decisions_sqlite: None,
+            decisions_memory: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn with_sqlite_path(config: ResultStoreConfig, path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self {
+        let path = path.as_ref().to_path_buf();
+        Ok(Self::open_with_paths(
+            config,
+            path.clone(),
+            decisions_path_for(&path),
+        ))
+    }
+
+    /// Open the Tauri app-scoped result store. Results and review decisions use
+    /// separate SQLite files so a huge or damaged results DB cannot block review.
+    pub fn open_at(config: ResultStoreConfig, app_dir: &Path) -> Self {
+        Self::open_with_paths(
+            config,
+            app_dir.join("result_store.sqlite3"),
+            app_dir.join("review_decisions.sqlite3"),
+        )
+    }
+
+    fn open_with_paths(
+        config: ResultStoreConfig,
+        results_path: PathBuf,
+        decisions_path: PathBuf,
+    ) -> Self {
+        let decisions_sqlite = DecisionsSqliteStore::open(&decisions_path)
+            .map_err(|err| {
+                log::error!(
+                    "review decisions SQLite unavailable at {}: {err}",
+                    decisions_path.display()
+                );
+                err
+            })
+            .ok();
+        let sqlite = SqliteStore::open(&results_path)
+            .map_err(|err| {
+                log::error!(
+                    "SQLite result store unavailable at {}; using memory only for results: {err}",
+                    results_path.display()
+                );
+                err
+            })
+            .ok();
+        let store = Self {
             inner: Mutex::new(HashMap::new()),
             config,
-            sqlite: Some(SqliteStore::open(path.as_ref())?),
-        })
+            sqlite,
+            decisions_sqlite,
+            decisions_memory: Mutex::new(HashMap::new()),
+        };
+        if let Err(err) = store.maybe_import_decisions_from_results() {
+            log::warn!("failed to import legacy review decisions: {err}");
+        }
+        store
+    }
+
+    pub fn decisions_persisted(&self) -> bool {
+        self.decisions_sqlite.is_some() || self.sqlite.is_some()
     }
 
     /// Reserve a slot at job-start time so the frontend can resolve `job_id`
@@ -366,33 +424,75 @@ impl ResultStore {
         if self.summary(&request.job_id).is_none() {
             bail!("Unknown job id: {}", request.job_id);
         }
-        let sqlite = self
-            .sqlite
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Review decisions require SQLite result storage"))?;
-        sqlite.save_decision(&request)
+        if let Some(store) = &self.decisions_sqlite {
+            return store.save_decision(&request);
+        }
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.save_decision(&request);
+        }
+        let dto = review_decision_from_request(&request);
+        self.decisions_memory.lock().insert(
+            (
+                request.job_id.clone(),
+                request.source_id,
+                request.target_id,
+            ),
+            dto.clone(),
+        );
+        Ok(dto)
     }
 
     pub fn get_decisions(&self, job_id: &str) -> Result<Vec<ReviewDecisionDto>> {
         if self.summary(job_id).is_none() {
             bail!("Unknown job id: {}", job_id);
         }
-        let sqlite = self
-            .sqlite
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Review decisions require SQLite result storage"))?;
-        sqlite.get_decisions(job_id)
+        if let Some(store) = &self.decisions_sqlite {
+            return store.get_decisions(job_id);
+        }
+        if let Some(sqlite) = &self.sqlite {
+            return sqlite.get_decisions(job_id);
+        }
+        let mut decisions = self
+            .decisions_memory
+            .lock()
+            .values()
+            .filter(|decision| decision.job_id == job_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        decisions.sort_by_key(|decision| decision.row_id);
+        Ok(decisions)
+    }
+
+    fn maybe_import_decisions_from_results(&self) -> Result<()> {
+        let Some(main) = &self.sqlite else {
+            return Ok(());
+        };
+        let Some(side) = &self.decisions_sqlite else {
+            return Ok(());
+        };
+        if !side.is_empty()? {
+            return Ok(());
+        }
+        for decision in main.list_all_decisions()? {
+            side.save_decision_dto(&decision)?;
+        }
+        Ok(())
     }
 
     pub fn diff(&self, request: &DiffJobsRequestDto) -> Result<DiffResultDto> {
         if request.base_job_id == request.compare_job_id {
             bail!("Choose two different jobs to compare");
         }
-        if self.summary(&request.base_job_id).is_none() {
+        let Some(base_summary) = self.summary(&request.base_job_id) else {
             bail!("Unknown job id: {}", request.base_job_id);
-        }
-        if self.summary(&request.compare_job_id).is_none() {
+        };
+        let Some(compare_summary) = self.summary(&request.compare_job_id) else {
             bail!("Unknown job id: {}", request.compare_job_id);
+        };
+        if base_summary.matches_found > super::scale::MAX_DIFF_ROWS
+            || compare_summary.matches_found > super::scale::MAX_DIFF_ROWS
+        {
+            bail!(super::scale::DIFF_TOO_LARGE_MESSAGE);
         }
         let base_rows = self.load_rows_for_diff(&request.base_job_id)?;
         let compare_rows = self.load_rows_for_diff(&request.compare_job_id)?;
@@ -738,6 +838,103 @@ fn filter_export_rows_in_memory<'a>(
         .collect()
 }
 
+fn decisions_path_for(results_path: &Path) -> PathBuf {
+    let stem = results_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("results");
+    results_path.with_file_name(format!("{stem}_decisions.sqlite3"))
+}
+
+fn review_decision_from_request(request: &SaveDecisionRequestDto) -> ReviewDecisionDto {
+    ReviewDecisionDto {
+        job_id: request.job_id.clone(),
+        row_id: request.row_id,
+        source_id: request.source_id,
+        target_id: request.target_id,
+        decision: request.decision.clone(),
+        note: request.note.clone(),
+        updated_at_unix_ms: now_ms(),
+    }
+}
+
+struct DecisionsSqliteStore {
+    conn: Mutex<Connection>,
+}
+
+impl DecisionsSqliteStore {
+    fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "busy_timeout", 5_000i64)?;
+        ensure_decisions_schema(&conn, false)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn is_empty(&self) -> Result<bool> {
+        let count: i64 = self
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))?;
+        Ok(count == 0)
+    }
+
+    fn save_decision(&self, request: &SaveDecisionRequestDto) -> Result<ReviewDecisionDto> {
+        let dto = review_decision_from_request(request);
+        self.save_decision_dto(&dto)?;
+        Ok(dto)
+    }
+
+    fn save_decision_dto(&self, decision: &ReviewDecisionDto) -> Result<()> {
+        self.conn.lock().execute(
+            "INSERT INTO decisions(job_id, source_id, target_id, row_id, decision, note, updated_at_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(job_id, source_id, target_id) DO UPDATE SET
+                row_id = excluded.row_id,
+                decision = excluded.decision,
+                note = excluded.note,
+                updated_at_unix_ms = excluded.updated_at_unix_ms",
+            params![
+                decision.job_id,
+                decision.source_id,
+                decision.target_id,
+                decision.row_id as i64,
+                decision.decision,
+                decision.note,
+                decision.updated_at_unix_ms as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_decisions(&self, job_id: &str) -> Result<Vec<ReviewDecisionDto>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT job_id, row_id, source_id, target_id, decision, note, updated_at_unix_ms
+             FROM decisions WHERE job_id = ?1 ORDER BY row_id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![job_id], |row| {
+                Ok(ReviewDecisionDto {
+                    job_id: row.get(0)?,
+                    row_id: row.get::<_, i64>(1)? as u64,
+                    source_id: row.get(2)?,
+                    target_id: row.get(3)?,
+                    decision: row.get(4)?,
+                    note: row.get(5)?,
+                    updated_at_unix_ms: row.get::<_, i64>(6)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+}
+
 struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -799,7 +996,7 @@ impl SqliteStore {
         ensure_jobs_schema(&conn)?;
         ensure_results_schema(&conn)?;
         ensure_person_lookup_schema(&conn)?;
-        ensure_decisions_schema(&conn)?;
+        ensure_decisions_schema(&conn, true)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -1145,6 +1342,28 @@ impl SqliteStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    fn list_all_decisions(&self) -> Result<Vec<ReviewDecisionDto>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT job_id, row_id, source_id, target_id, decision, note, updated_at_unix_ms
+             FROM decisions ORDER BY job_id ASC, row_id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ReviewDecisionDto {
+                    job_id: row.get(0)?,
+                    row_id: row.get::<_, i64>(1)? as u64,
+                    source_id: row.get(2)?,
+                    target_id: row.get(3)?,
+                    decision: row.get(4)?,
+                    note: row.get(5)?,
+                    updated_at_unix_ms: row.get::<_, i64>(6)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 fn upsert_job_metadata_tx(tx: &rusqlite::Transaction<'_>, job: &StoredJob) -> Result<()> {
@@ -1328,7 +1547,7 @@ fn ensure_person_lookup_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_decisions_schema(conn: &Connection) -> Result<()> {
+fn ensure_decisions_schema(conn: &Connection, enforce_job_fk: bool) -> Result<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(decisions)")?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
@@ -1336,7 +1555,12 @@ fn ensure_decisions_schema(conn: &Connection) -> Result<()> {
     if !columns.is_empty() && !columns.iter().any(|column| column == "source_id") {
         conn.execute("DROP TABLE decisions", [])?;
     }
-    conn.execute_batch(
+    let fk_clause = if enforce_job_fk {
+        ",\n            FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE"
+    } else {
+        ""
+    };
+    conn.execute_batch(&format!(
         r#"
         CREATE TABLE IF NOT EXISTS decisions (
             job_id TEXT NOT NULL,
@@ -1346,12 +1570,11 @@ fn ensure_decisions_schema(conn: &Connection) -> Result<()> {
             decision TEXT NOT NULL,
             note TEXT,
             updated_at_unix_ms INTEGER NOT NULL,
-            PRIMARY KEY (job_id, source_id, target_id),
-            FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+            PRIMARY KEY (job_id, source_id, target_id){fk_clause}
         );
         CREATE INDEX IF NOT EXISTS idx_decisions_job_row ON decisions(job_id, row_id);
-        "#,
-    )?;
+        "#
+    ))?;
     Ok(())
 }
 
@@ -1859,9 +2082,10 @@ mod tests {
                 true,
             );
         }
-        let spill_rows: Vec<MatchPairDto> = (0..crate::run_service::scale::RESULT_SPILL_ROWS + 3)
-            .map(|i| mk_pair(i as u64, 90.0, "a", "b"))
-            .collect();
+        let spill_rows: Vec<MatchPairDto> =
+            (0..crate::run_service::scale::RESULT_SPILL_ROWS)
+                .map(|i| mk_pair(i as u64, 90.0, "a", "b"))
+                .collect();
         store.append_result_rows("base-spill", &spill_rows).unwrap();
         let mut added_row = mk_pair(999, 95.0, "added", "target");
         added_row.source_id = 9_000_000;
@@ -2269,6 +2493,148 @@ mod tests {
                 .to_string()
                 .contains("Invalid review decision")
         );
+    }
+
+    #[test]
+    fn review_decisions_use_sidecar_when_results_db_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "nm_review_sidecar_{}_{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let results_path = dir.join("missing_results.sqlite3");
+        let decisions_path = dir.join("review_decisions.sqlite3");
+        let store = ResultStore::open_with_paths(
+            ResultStoreConfig::default(),
+            results_path,
+            decisions_path.clone(),
+        );
+        store.reserve(
+            "review".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            1,
+        );
+        store.mark_finished("review", 1, 1);
+        let saved = store
+            .save_decision(SaveDecisionRequestDto {
+                job_id: "review".into(),
+                row_id: 1,
+                source_id: 10,
+                target_id: 20,
+                decision: "accepted".into(),
+                note: Some("sidecar".into()),
+            })
+            .unwrap();
+        assert_eq!(saved.decision, "accepted");
+        let decisions = store.get_decisions("review").unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].note.as_deref(), Some("sidecar"));
+        assert!(decisions_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn diff_same_job_still_errors() {
+        let store = ResultStore::new();
+        store.reserve(
+            "solo".into(),
+            AlgorithmDto::Fuzzy,
+            "source".into(),
+            "target".into(),
+            1,
+        );
+        store
+            .set_rows("solo", vec![mk_pair(1, 90.0, "a", "b")])
+            .unwrap();
+        store.mark_finished("solo", 1, 2);
+
+        let err = store
+            .diff(&DiffJobsRequestDto {
+                base_job_id: "solo".into(),
+                compare_job_id: "solo".into(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("Choose two different jobs"));
+    }
+
+    #[test]
+    fn diff_in_memory_below_cap_still_works() {
+        let store = ResultStore::new();
+        for job_id in ["mem-base", "mem-compare"] {
+            store.reserve(
+                job_id.into(),
+                AlgorithmDto::Fuzzy,
+                "source".into(),
+                "target".into(),
+                1,
+            );
+        }
+        store
+            .set_rows("mem-base", vec![mk_pair(1, 90.0, "only-base", "target")])
+            .unwrap();
+        store
+            .set_rows(
+                "mem-compare",
+                vec![
+                    mk_pair(1, 90.0, "only-base", "target"),
+                    mk_pair(2, 91.0, "added", "target"),
+                ],
+            )
+            .unwrap();
+        store.mark_finished("mem-base", 1, 2);
+        store.mark_finished("mem-compare", 2, 2);
+
+        let diff = store
+            .diff(&DiffJobsRequestDto {
+                base_job_id: "mem-base".into(),
+                compare_job_id: "mem-compare".into(),
+            })
+            .unwrap();
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.removed.len(), 0);
+    }
+
+    #[test]
+    fn diff_large_spilled_guard() {
+        let path = sqlite_path("diff_large_guard");
+        let store = ResultStore::with_sqlite_path(ResultStoreConfig::default(), &path).unwrap();
+        for job_id in ["large-base", "small-compare"] {
+            store.reserve_with_options(
+                job_id.into(),
+                AlgorithmDto::Fuzzy,
+                "source".into(),
+                "target".into(),
+                1,
+                false,
+                true,
+            );
+        }
+        let large_rows: Vec<MatchPairDto> =
+            (0..crate::run_service::scale::MAX_DIFF_ROWS + 1)
+                .map(|i| mk_pair(i, 90.0, "a", "b"))
+                .collect();
+        store
+            .append_result_rows("large-base", &large_rows)
+            .unwrap();
+        store
+            .append_result_rows(
+                "small-compare",
+                std::slice::from_ref(&mk_pair(1, 90.0, "a", "b")),
+            )
+            .unwrap();
+        store.mark_finished("large-base", large_rows.len() as u64, 2);
+        store.mark_finished("small-compare", 1, 2);
+
+        let err = store
+            .diff(&DiffJobsRequestDto {
+                base_job_id: "large-base".into(),
+                compare_job_id: "small-compare".into(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("too large"));
     }
 
     #[test]

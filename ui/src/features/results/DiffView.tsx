@@ -9,6 +9,11 @@ export function DiffView({
   diff: DiffResultDto;
   onClose: () => void;
 }) {
+  const showTruncationNote =
+    diff.added.length > 12 ||
+    diff.removed.length > 12 ||
+    diff.changed.length > 12;
+
   return (
     <div className="border-t border-white/10 px-4 py-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -21,6 +26,11 @@ export function DiffView({
           Close compare
         </Button>
       </div>
+      {showTruncationNote && (
+        <p className="mb-3 text-xs text-ink-400" role="note">
+          Showing first 12 rows per section.
+        </p>
+      )}
       <div className="grid xl:grid-cols-3 gap-3">
         <DiffColumn title="Added" rows={diff.added} tone="ok" />
         <DiffColumn title="Removed" rows={diff.removed} tone="danger" />

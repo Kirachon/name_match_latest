@@ -26,7 +26,7 @@ export function ReviewToolbar({
           {formatNumber(pending)} pending in band
         </Pill>
         <span className="text-xs text-ink-400">
-          {formatNumber(total)} rows on this page
+          {formatNumber(total)} rows on this page · review controls in band only
         </span>
       </div>
       <Button

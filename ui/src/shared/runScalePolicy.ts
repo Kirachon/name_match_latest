@@ -10,6 +10,11 @@ export const SCALE_STRONG_WARN_ROWS = 500_000;
 export const SCALE_BLOCK_ROWS = 1_000_000;
 export const LARGE_RESULTS_BANNER_ROWS = 100_000;
 export const LARGE_RESULTS_DEFAULT_PAGE_SIZE = 50;
+export const MAX_DIFF_ROWS = 100_000;
+export const MAX_XLSX_EXPORT_ROWS = 100_000;
+
+export const DIFF_TOO_LARGE_MESSAGE =
+  "This comparison is too large to load safely in memory. Export both runs as CSV and compare externally, or rerun with narrower filters.";
 
 export type EffectiveRunMode = "in-memory" | "streaming";
 
@@ -48,6 +53,12 @@ export function algorithmSupportsDbStreaming(algorithm: AlgorithmDto): boolean {
     algorithm === "deterministic-fn-ln-bd" ||
     algorithm === "deterministic-fn-mn-ln-bd"
   );
+}
+
+export function sameDbSession(
+  config: Pick<RunConfigDto, "source" | "target">,
+): boolean {
+  return config.source.session_id === config.target.session_id;
 }
 
 export function scaleBlockReason(
@@ -93,11 +104,13 @@ export function scaleBlockMessage(reason: ScaleBlockReason): string {
   }
 }
 
-export function streamingBackendActive(
-  config: Pick<
-    RunConfigDto,
-    "source" | "target" | "streaming" | "algorithm" | "cascade"
-  >,
+type DbStreamingConfig = Pick<
+  RunConfigDto,
+  "source" | "target" | "streaming" | "algorithm" | "cascade"
+>;
+
+function dbStreamingEligibleIgnoringSession(
+  config: DbStreamingConfig,
 ): boolean {
   if (config.cascade?.enabled) return false;
   if (
@@ -113,4 +126,30 @@ export function streamingBackendActive(
     rowCountForSide(config.target),
   );
   return effective === "streaming";
+}
+
+export function streamingBackendActive(config: DbStreamingConfig): boolean {
+  return dbStreamingEligibleIgnoringSession(config) && sameDbSession(config);
+}
+
+export function compareBlockedReason(
+  baseMatches: number,
+  compareMatches: number,
+): string | null {
+  if (baseMatches > MAX_DIFF_ROWS || compareMatches > MAX_DIFF_ROWS) {
+    return DIFF_TOO_LARGE_MESSAGE;
+  }
+  return null;
+}
+
+export function crossSessionDbStreamingMessage(): string {
+  return "Large database streaming currently requires source and target tables from the same DB session. Reconnect both tables through one session or run a smaller job.";
+}
+
+export function needsCrossSessionDbStreamingNotice(
+  config: DbStreamingConfig,
+): boolean {
+  return (
+    dbStreamingEligibleIgnoringSession(config) && !sameDbSession(config)
+  );
 }

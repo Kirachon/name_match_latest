@@ -10,6 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use tauri::State;
 
+const EXPORT_CHUNK_SIZE: usize = 5_000;
+const MAX_XLSX_EXPORT_ROWS: u64 = 100_000;
+
 #[tauri::command]
 pub fn get_results_page(
     request: ResultPageRequestDto,
@@ -175,15 +178,25 @@ pub fn export_results(
         .export_has_cascade_levels(&request.job_id)
         .map_err(|e| AppError::Validation(e.to_string()))?;
 
-    const CHUNK: usize = 5_000;
     let want_csv = matches!(request.format, ExportFormatDto::Csv | ExportFormatDto::Both);
     let want_xlsx = matches!(request.format, ExportFormatDto::Xlsx | ExportFormatDto::Both);
+    if want_xlsx {
+        let xlsx_row_count = state
+            .results
+            .for_each_export_row(&request.job_id, &export_filter, EXPORT_CHUNK_SIZE, |_| Ok(()))
+            .map_err(|e| AppError::Validation(e.to_string()))?;
+        if xlsx_row_count == 0 {
+            return Err(AppError::Validation("No results to export".into()));
+        }
+        validate_xlsx_export_size(true, xlsx_row_count)?;
+    }
+
     let extra_headers = if request.include_extra_fields {
         collect_extra_field_headers(
             state.results.as_ref(),
             &request.job_id,
             &export_filter,
-            CHUNK,
+            EXPORT_CHUNK_SIZE,
         )
         .map_err(|e| AppError::Validation(e.to_string()))?
     } else {
@@ -204,7 +217,7 @@ pub fn export_results(
 
     let row_count = state
         .results
-        .for_each_export_row(&request.job_id, &export_filter, CHUNK, |chunk| {
+        .for_each_export_row(&request.job_id, &export_filter, EXPORT_CHUNK_SIZE, |chunk| {
             for row in chunk {
                 if let Some(level) = row.matched_at_level
                     && (selected_levels.is_empty() || selected_levels.contains(&level))
@@ -248,7 +261,7 @@ pub fn export_results(
                         state.results.as_ref(),
                         &request.job_id,
                         &level_filter,
-                        CHUNK,
+                        EXPORT_CHUNK_SIZE,
                     )
                     .map_err(|e| AppError::Validation(e.to_string()))?
                 } else {
@@ -257,7 +270,7 @@ pub fn export_results(
                 write_csv_header(&mut level_wtr, true, &level_extra)?;
                 state
                     .results
-                    .for_each_export_row(&request.job_id, &level_filter, CHUNK, |chunk| {
+                    .for_each_export_row(&request.job_id, &level_filter, EXPORT_CHUNK_SIZE, |chunk| {
                         append_csv_rows(&mut level_wtr, chunk, true, &level_extra)?;
                         Ok(())
                     })
@@ -288,6 +301,15 @@ pub fn export_results(
         written_paths: written,
         rows_exported: row_count,
     })
+}
+
+fn validate_xlsx_export_size(want_xlsx: bool, row_count: u64) -> AppResult<()> {
+    if want_xlsx && row_count > MAX_XLSX_EXPORT_ROWS {
+        return Err(AppError::Validation(format!(
+            "XLSX export is limited to {MAX_XLSX_EXPORT_ROWS} rows to avoid excessive memory use. Export CSV instead or narrow the filters."
+        )));
+    }
+    Ok(())
 }
 
 fn group_rows_by_level<'a>(
@@ -748,6 +770,17 @@ mod tests {
         let meta = std::fs::metadata(&path).expect("xlsx metadata");
         assert!(meta.len() > 0);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_csv_export_is_not_limited_by_xlsx_guard() {
+        validate_xlsx_export_size(false, MAX_XLSX_EXPORT_ROWS + 1).unwrap();
+    }
+
+    #[test]
+    fn large_xlsx_export_is_rejected_before_buffering_rows() {
+        let err = validate_xlsx_export_size(true, MAX_XLSX_EXPORT_ROWS + 1).unwrap_err();
+        assert!(err.to_string().contains("XLSX export is limited"));
     }
 
     #[test]

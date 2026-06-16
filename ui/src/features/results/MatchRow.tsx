@@ -1,5 +1,10 @@
 import { cx, formatPercent } from "@/shared/lib/format";
-import type { MatchPairDto, ReviewDecisionValue } from "@/shared/tauri/types";
+import { inReviewBand } from "@/shared/lib/reviewBand";
+import type {
+  MatchPairDto,
+  ReviewBandDto,
+  ReviewDecisionValue,
+} from "@/shared/tauri/types";
 import { ReviewActions } from "./ReviewActions";
 
 export function MatchRow({
@@ -9,6 +14,7 @@ export function MatchRow({
   selected,
   decision,
   decisionSaving,
+  reviewBand,
   onSelect,
   onDecision,
 }: {
@@ -18,9 +24,11 @@ export function MatchRow({
   selected: boolean;
   decision?: ReviewDecisionValue;
   decisionSaving: boolean;
+  reviewBand: ReviewBandDto | null | undefined;
   onSelect: () => void;
   onDecision: (decision: ReviewDecisionValue) => void;
 }) {
+  const needsReview = inReviewBand(row.confidence, reviewBand);
   return (
     <div
       role="row"
@@ -88,11 +96,20 @@ export function MatchRow({
         {row.matched_fields.join(", ")}
       </div>
       <div role="cell">
-        <ReviewActions
-          decision={decision}
-          disabled={decisionSaving}
-          onDecision={onDecision}
-        />
+        {needsReview ? (
+          <ReviewActions
+            decision={decision}
+            disabled={decisionSaving}
+            onDecision={onDecision}
+          />
+        ) : (
+          <span
+            className="text-2xs text-ink-500"
+            title="Outside review band — no manual review needed"
+          >
+            —
+          </span>
+        )}
       </div>
     </div>
   );

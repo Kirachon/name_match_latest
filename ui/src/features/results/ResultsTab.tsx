@@ -29,7 +29,12 @@ import {
   SectionHeader,
 } from "@/shared/components/primitives";
 import { formatDuration, formatNumber } from "@/shared/lib/format";
-import { LARGE_RESULTS_BANNER_ROWS } from "@/shared/runScalePolicy";
+import { inReviewBand } from "@/shared/lib/reviewBand";
+import {
+  compareBlockedReason,
+  LARGE_RESULTS_BANNER_ROWS,
+  MAX_DIFF_ROWS,
+} from "@/shared/runScalePolicy";
 import { JOB_STATE_TERMINAL } from "@/shared/tauri/types";
 import type {
   ExportFormatDto,
@@ -66,6 +71,10 @@ export function ResultsTab() {
   const [compareJobId, setCompareJobId] = useState("");
   const [diff, setDiff] = useState<DiffResultDto | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [exportingFormat, setExportingFormat] = useState<ExportFormatDto | null>(
+    null,
+  );
   const [selectedRow, setSelectedRow] = useState<MatchPairDto | null>(null);
   const [decisions, setDecisions] = useState<Record<string, ReviewDecisionDto>>(
     {},
@@ -252,6 +261,7 @@ export function ResultsTab() {
         return;
       }
       if (!selectedRow || savingRows.has(selectedRow.row_id)) return;
+      if (!inReviewBand(selectedRow.confidence, exportCfg.review_band)) return;
       if (event.key.toLowerCase() === "a") {
         event.preventDefault();
         void onDecision(selectedRow, "accepted");
@@ -263,7 +273,7 @@ export function ResultsTab() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeJobId, selectedRow, savingRows, decisions, page]);
+  }, [activeJobId, selectedRow, savingRows, decisions, page, exportCfg.review_band]);
 
   if (!activeJobId) {
     return (
@@ -298,6 +308,15 @@ export function ResultsTab() {
     Object.entries(decisions).map(([key, value]) => [key, value.decision]),
   ) as Record<string, ReviewDecisionValue>;
 
+  const baseJob = jobs.find((job) => job.job_id === baseJobId);
+  const compareJob = jobs.find((job) => job.job_id === compareJobId);
+  const compareBlocked = compareBlockedReason(
+    baseJob?.matches_found ?? 0,
+    compareJob?.matches_found ?? 0,
+  );
+  const compareStatusMessage = compareError ?? compareBlocked;
+  const compareStatusTone = compareError ? "error" : "warn";
+
   function toggleLevel(level: number) {
     const next = levels.includes(level)
       ? levels.filter((value) => value !== level)
@@ -307,6 +326,7 @@ export function ResultsTab() {
 
   async function onDecision(row: MatchPairDto, decision: ReviewDecisionValue) {
     if (!activeJobId) return;
+    if (!inReviewBand(row.confidence, exportCfg.review_band)) return;
     setSavingRows((current) => new Set(current).add(row.row_id));
     try {
       const saved = await saveDecision({
@@ -356,7 +376,12 @@ export function ResultsTab() {
 
   async function onCompareJobs() {
     if (!baseJobId || !compareJobId || baseJobId === compareJobId) return;
+    if (compareBlocked) {
+      setCompareError(compareBlocked);
+      return;
+    }
     setDiffLoading(true);
+    setCompareError(null);
     try {
       const result = await diffJobs({
         base_job_id: baseJobId,
@@ -364,13 +389,15 @@ export function ResultsTab() {
       });
       setDiff(result);
     } catch (err: unknown) {
+      const message =
+        typeof err === "object" && err && "message" in err
+          ? String((err as { message: unknown }).message)
+          : String(err);
+      setCompareError(message);
       pushToast({
         tone: "error",
         title: "Could not compare runs",
-        message:
-          typeof err === "object" && err && "message" in err
-            ? String((err as { message: unknown }).message)
-            : String(err),
+        message,
       });
     } finally {
       setDiffLoading(false);
@@ -378,7 +405,7 @@ export function ResultsTab() {
   }
 
   async function onExport(format: ExportFormatDto) {
-    if (!activeJobId) return;
+    if (!activeJobId || exportingFormat) return;
     let dir = exportCfg.output_directory;
     if (!dir) {
       const picked = await open({ directory: true, multiple: false }).catch(
@@ -388,6 +415,7 @@ export function ResultsTab() {
       dir = picked;
     }
     try {
+      setExportingFormat(format);
       const r = await exportResults({
         job_id: activeJobId,
         format,
@@ -403,15 +431,18 @@ export function ResultsTab() {
         message: r.written_paths.join("\n"),
       });
     } catch (err: unknown) {
+      const message =
+        typeof err === "object" && err && "message" in err
+          ? String((err as { message: unknown }).message)
+          : String(err);
       pushToast({
         tone: "error",
         title: "Export failed",
-        message:
-          typeof err === "object" && err && "message" in err
-            ? String((err as { message: unknown }).message)
-            : String(err),
+        message,
         ttlMs: null,
       });
+    } finally {
+      setExportingFormat(null);
     }
   }
 
@@ -474,13 +505,28 @@ export function ResultsTab() {
           }
           action={
             <div className="flex items-center gap-2 flex-wrap justify-end">
-              <Button tone="secondary" onClick={() => onExport("csv")}>
+              <Button
+                tone="secondary"
+                onClick={() => onExport("csv")}
+                loading={exportingFormat === "csv"}
+                disabled={!!exportingFormat}
+              >
                 Export CSV
               </Button>
-              <Button tone="secondary" onClick={() => onExport("xlsx")}>
+              <Button
+                tone="secondary"
+                onClick={() => onExport("xlsx")}
+                loading={exportingFormat === "xlsx"}
+                disabled={!!exportingFormat}
+              >
                 Export XLSX
               </Button>
-              <Button tone="primary" onClick={() => onExport("both")}>
+              <Button
+                tone="primary"
+                onClick={() => onExport("both")}
+                loading={exportingFormat === "both"}
+                disabled={!!exportingFormat}
+              >
                 Export both
               </Button>
               <Button
@@ -630,6 +676,7 @@ export function ResultsTab() {
                 onChange={(e) => {
                   setBaseJobId(e.target.value);
                   setDiff(null);
+                  setCompareError(null);
                 }}
               >
                 {jobs.map((job) => (
@@ -647,6 +694,7 @@ export function ResultsTab() {
                 onChange={(e) => {
                   setCompareJobId(e.target.value);
                   setDiff(null);
+                  setCompareError(null);
                 }}
               >
                 {jobs
@@ -664,11 +712,33 @@ export function ResultsTab() {
                 tone="secondary"
                 onClick={onCompareJobs}
                 loading={diffLoading}
-                disabled={!compareJobId || baseJobId === compareJobId}
+                disabled={
+                  !compareJobId ||
+                  baseJobId === compareJobId ||
+                  !!compareBlocked
+                }
+                title={
+                  compareBlocked ??
+                  (baseJobId === compareJobId
+                    ? "Choose two different runs"
+                    : `Compare runs with up to ${formatNumber(MAX_DIFF_ROWS)} matches each`)
+                }
               >
                 Compare
               </Button>
             </div>
+            {compareStatusMessage && (
+              <div
+                className={
+                  compareStatusTone === "error"
+                    ? "lg:col-span-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-100"
+                    : "lg:col-span-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+                }
+                role="status"
+              >
+                {compareStatusMessage}
+              </div>
+            )}
           </div>
         )}
         {diff && <DiffView diff={diff} onClose={() => setDiff(null)} />}
@@ -721,6 +791,7 @@ export function ResultsTab() {
               selectedRowId={selectedRow?.row_id ?? null}
               decisions={decisionValues}
               savingRowIds={savingRows}
+              reviewBand={exportCfg.review_band}
               onSelectRow={setSelectedRow}
               onDecision={onDecision}
             />
@@ -753,13 +824,4 @@ function isTypingTarget(target: EventTarget | null) {
     tag === "textarea" ||
     tag === "select"
   );
-}
-
-function inReviewBand(
-  confidence: number,
-  band: { min_confidence: number; max_confidence: number } | null | undefined,
-) {
-  const min = band?.min_confidence ?? 70;
-  const max = band?.max_confidence ?? 85;
-  return confidence >= min && confidence <= max;
 }

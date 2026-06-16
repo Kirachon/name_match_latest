@@ -21,7 +21,9 @@ import {
 } from "@/shared/tauri/types";
 import { cx, formatNumber } from "@/shared/lib/format";
 import {
+  crossSessionDbStreamingMessage,
   maxSideRows,
+  needsCrossSessionDbStreamingNotice,
   resolveEffectiveRunMode,
   rowCountForSide,
   SCALE_WARN_ROWS,
@@ -406,6 +408,20 @@ export function StreamingCard() {
     },
   });
   const warn = scaleWarningLevel(Math.max(srcRows, tgtRows));
+  const crossSessionNotice = needsCrossSessionDbStreamingNotice({
+    source: srcSel,
+    target: tgtSel,
+    streaming: s,
+    algorithm,
+    cascade: {
+      enabled: mode === "deep",
+      levels: cascade.levels,
+      fuzzy_threshold: cascade.fuzzy_threshold,
+      exclusion_mode: cascade.exclusion_mode,
+      has_barangay_code: false,
+      has_city_code: false,
+    },
+  });
   return (
     <Card>
       <SectionHeader
@@ -430,6 +446,9 @@ export function StreamingCard() {
               ? "500k+ rows per side: confirm before starting and prefer export for large result sets."
               : "100k+ rows per side: streaming or import-to-DB is recommended."}
           </p>
+        )}
+        {crossSessionNotice && (
+          <p className="text-amber-200/90">{crossSessionDbStreamingMessage()}</p>
         )}
       </div>
       <div className="grid md:grid-cols-2 gap-3">
@@ -600,7 +619,7 @@ export function ExportCard() {
         )}
         <Field
           label="Review band"
-          help="Rows in this confidence range are highlighted for manual accept/reject review."
+          help="Rows in this confidence range show accept/reject controls in Results. High-confidence matches (e.g. 100%) are skipped."
           className="md:col-span-2"
         >
           <div className="grid sm:grid-cols-2 gap-3">

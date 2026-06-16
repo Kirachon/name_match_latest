@@ -9,6 +9,8 @@ pub const SCALE_WARN_ROWS: u64 = 100_000;
 pub const SCALE_STRONG_WARN_ROWS: u64 = 500_000;
 pub const SCALE_BLOCK_ROWS: u64 = 1_000_000;
 pub const RESULT_SPILL_ROWS: usize = 100_000;
+pub const MAX_DIFF_ROWS: u64 = 100_000;
+pub const DIFF_TOO_LARGE_MESSAGE: &str = "This comparison is too large to load safely in memory. Export both runs as CSV and compare externally, or rerun with narrower filters.";
 pub const LARGE_RESULTS_BANNER_ROWS: u64 = 100_000;
 pub const LARGE_RESULTS_DEFAULT_PAGE_SIZE: u32 = 50;
 
@@ -65,8 +67,15 @@ pub fn is_db_to_db(config: &RunConfigDto) -> bool {
         && matches!(config.target.source_kind, DataSourceKindDto::Database)
 }
 
+pub fn is_same_db_session(config: &RunConfigDto) -> bool {
+    config.source.session_id == config.target.session_id
+}
+
 pub fn should_use_db_streaming_worker(config: &RunConfigDto) -> bool {
     if !is_db_to_db(config) {
+        return false;
+    }
+    if !is_same_db_session(config) {
         return false;
     }
     if config.cascade.as_ref().is_some_and(|c| c.enabled) {
@@ -161,6 +170,18 @@ mod tests {
             resolve_effective_run_mode(&cfg, 150_000, 150_000),
             EffectiveRunMode::Streaming
         );
+    }
+
+    #[test]
+    fn streaming_worker_requires_same_db_session() {
+        let mut cfg = db_config(
+            150_000,
+            RunModeDto::Streaming,
+            AlgorithmDto::DeterministicFnLnBd,
+        );
+        cfg.target.session_id = "other-session".into();
+
+        assert!(!should_use_db_streaming_worker(&cfg));
     }
 
     #[test]

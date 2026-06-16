@@ -1,6 +1,10 @@
 import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { MatchPairDto, ReviewDecisionValue } from "@/shared/tauri/types";
+import type {
+  MatchPairDto,
+  ReviewBandDto,
+  ReviewDecisionValue,
+} from "@/shared/tauri/types";
 import { MatchRow } from "./MatchRow";
 
 const COL_TEMPLATE = "70px 90px 1fr 110px 90px 1fr 110px 90px 130px 90px 116px";
@@ -10,6 +14,7 @@ export function ResultsTable({
   selectedRowId,
   decisions,
   savingRowIds,
+  reviewBand,
   onSelectRow,
   onDecision,
 }: {
@@ -17,6 +22,7 @@ export function ResultsTable({
   selectedRowId: number | null;
   decisions: Record<string, ReviewDecisionValue>;
   savingRowIds: Set<number>;
+  reviewBand: ReviewBandDto | null | undefined;
   onSelectRow: (row: MatchPairDto) => void;
   onDecision: (row: MatchPairDto, decision: ReviewDecisionValue) => void;
 }) {
@@ -72,6 +78,7 @@ export function ResultsTable({
               selected={selectedRowId === r.row_id}
               decision={decisions[decisionKey(r)]}
               decisionSaving={savingRowIds.has(r.row_id)}
+              reviewBand={reviewBand}
               onSelect={() => onSelectRow(r)}
               onDecision={(decision) => onDecision(r, decision)}
             />
