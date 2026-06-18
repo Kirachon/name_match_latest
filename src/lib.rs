@@ -40,6 +40,9 @@ pub mod normalize;
 pub mod perf;
 pub mod util;
 
+#[cfg(feature = "gpu-bench")]
+pub mod benchmarking;
+
 pub mod optimization;
 
 pub mod run_service;

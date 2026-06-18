@@ -709,7 +709,7 @@ export function PerformanceCard() {
             })
           }
           label="Ultra performance"
-          description="Maxes out threads and pool. Disables manual overrides."
+          description="Chooses the fastest safe CPU/GPU settings for this machine and workload. Respects CPU, Auto, and Force GPU choices."
         />
         <Toggle
           checked={opts.persist_result_history}

@@ -24,6 +24,8 @@ pub async fn start_matching(
     config: RunConfigDto,
     state: State<'_, Arc<AppState>>,
 ) -> AppResult<String> {
+    name_matcher::run_service::validate_run_config(&config)
+        .map_err(|e| AppError::Validation(e.to_string()))?;
     // Validate selection up-front so we never spawn a worker on garbage input.
     validate_selection("source", &config.source)?;
     validate_selection("target", &config.target)?;

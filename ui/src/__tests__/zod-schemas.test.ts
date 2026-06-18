@@ -106,6 +106,65 @@ describe("RunConfigSchema", () => {
     }
   });
 
+  it("accepts ultra performance with CPU mode when GPU helpers are off", () => {
+    const result = parseRunConfig({
+      ...validRunConfig(),
+      options: {
+        ...validRunConfig().options,
+        ultra_performance: true,
+        auto_optimize: false,
+      },
+      gpu: {
+        ...validRunConfig().gpu,
+        mode: "cpu",
+        dynamic_tuning: false,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts ultra performance with auto GPU mode and blank VRAM", () => {
+    const result = parseRunConfig({
+      ...validRunConfig(),
+      options: {
+        ...validRunConfig().options,
+        ultra_performance: true,
+        auto_optimize: false,
+      },
+      gpu: {
+        ...validRunConfig().gpu,
+        mode: "auto",
+        vram_budget_mb: null,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("still rejects CPU mode GPU helpers when ultra performance is enabled", () => {
+    const result = parseRunConfig({
+      ...validRunConfig(),
+      options: {
+        ...validRunConfig().options,
+        ultra_performance: true,
+        auto_optimize: false,
+      },
+      gpu: {
+        ...validRunConfig().gpu,
+        mode: "cpu",
+        use_direct_prefilter: true,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.issues).toContain(
+        "gpu.use_direct_prefilter: GPU prefilter requires GPU mode",
+      );
+    }
+  });
+
   it("requires at least one cascade level when cascade mode is enabled", () => {
     const result = parseRunConfig({
       ...validRunConfig(),

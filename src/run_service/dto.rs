@@ -510,8 +510,10 @@ pub struct MatchOptionsDto {
     /// Auto-optimise rayon threads / batch sizes from system profile.
     #[serde(default)]
     pub auto_optimize: bool,
-    /// Run in "ultra" preset (max resources). Mutually exclusive with manual
-    /// pool / batch overrides which the UI greys out when this is on.
+    /// Run in the adaptive Ultra preset. The run service chooses the fastest
+    /// safe CPU/GPU settings for the current machine and workload while
+    /// respecting explicit CPU/Auto/Force GPU mode. Mutually exclusive with
+    /// manual pool / thread overrides.
     #[serde(default)]
     pub ultra_performance: bool,
     /// Override rayon thread count (`None` = auto).

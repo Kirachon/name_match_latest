@@ -39,6 +39,12 @@ required-features = ["gpu"]
 name = "seed"
 path = "src/bin/seed.rs"
 
+# GPU/string-distance benchmark harness. Experimental and non-production.
+[[bin]]
+name = "gpu_string_bench"
+path = "src/bin/gpu_string_bench.rs"
+required-features = ["gpu-bench"]
+
 [dependencies]
 anyhow = "1.0.99"
 calamine = "0.26"
@@ -63,6 +69,7 @@ serde_json = "1.0.145"
 sha2 = "0.10"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "mysql", "chrono", "uuid"] }
 strsim = "0.11.1"
+stringzilla = { path = "scratch/vendor/stringzilla-4.6.2", optional = true }
 sysinfo = "0.37.0"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["full"] }
@@ -76,6 +83,9 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 default = []
 gpu = ["dep:cudarc", "cudarc/cuda-version-from-build-system"]
 gui = ["dep:eframe", "dep:egui", "dep:rfd"]
+gpu-bench = []
+experimental-stringzilla-cuda = ["gpu-bench", "dep:stringzilla", "stringzilla/cuda"]
+experimental-rapids-bench = ["gpu-bench"]
 new_cli = []
 new_engine = []
 

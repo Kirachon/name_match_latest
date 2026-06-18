@@ -74,10 +74,13 @@ Write-Host "Copied GPU DLLs: $($copied -join ', ')"
 
 Write-Host "[tauri] cargo tauri build (GPU)"
 Push-Location "$repoRoot\src-tauri"
+$overrideFile = Join-Path $repoRoot "tmp\tauri-build-no-before.json"
+New-Item -ItemType Directory -Force (Split-Path $overrideFile -Parent) | Out-Null
+Set-Content -Path $overrideFile -Encoding UTF8 -Value '{"build":{"beforeBuildCommand":""}}'
 if ($NoBundle) {
-  cargo tauri build --features gpu --no-bundle
+  cargo tauri build --features gpu --no-bundle --config $overrideFile
 } else {
-  cargo tauri build --features gpu
+  cargo tauri build --features gpu --config $overrideFile
 }
 Pop-Location
 

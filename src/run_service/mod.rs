@@ -15,12 +15,15 @@
 //!   shell wraps with throttling + `AppHandle::emit`.
 
 pub mod dto;
+mod performance;
 pub mod scale;
 pub mod sink;
 pub mod store;
 
 use crate::perf::StageTimer;
 pub use dto::*;
+pub use performance::validate_run_config;
+use performance::{apply_performance_plan, resolve_performance_plan};
 pub use sink::{ConsoleEventSink, EventSink, MultiEventSink, NullEventSink};
 pub use store::{ExportRowFilter, ResultStore, ResultStoreConfig, StoredJob};
 
@@ -478,6 +481,16 @@ fn run_worker(
     stream_runner: Option<DbStreamRunner>,
 ) {
     let sink_ref: &dyn EventSink = sink.as_ref();
+    if let Err(err) = validate_run_config(&config) {
+        fail_state(
+            &state,
+            sink_ref,
+            Some(store.as_ref()),
+            &job_id,
+            format!("Run config validation failed: {err}"),
+        );
+        return;
+    }
     if let Some(runner) = stream_runner {
         if scale::should_use_any_db_streaming_worker(&config) {
             let streaming_label = if scale::should_use_two_pool_db_streaming_worker(&config) {
@@ -635,7 +648,27 @@ fn run_worker(
 
     // 2) Resolve job-local matching options. Runtime jobs use a scoped Rayon
     // pool so one run cannot mutate process-wide thread settings for another.
-    let scoped_rayon_threads = resolve_rayon_threads(&config.options, config.algorithm.to_engine());
+    let plan = match resolve_performance_plan(&config, t1.len(), t2.len()) {
+        Ok(plan) => plan,
+        Err(err) => {
+            fail_state(
+                &state,
+                sink_ref,
+                Some(store.as_ref()),
+                &job_id,
+                format!("Performance plan failed: {err}"),
+            );
+            return;
+        }
+    };
+    apply_performance_plan(&plan);
+    sink.emit_log(LogEntryDto {
+        job_id: job_id.clone(),
+        timestamp_ms: now_ms(),
+        level: LogLevelDto::Info,
+        message: plan.log_summary(&config, t1.len(), t2.len()),
+    });
+    let scoped_rayon_threads = plan.scoped_rayon_threads;
     if let Some(threads) = scoped_rayon_threads {
         sink.emit_log(LogEntryDto {
             job_id: job_id.clone(),
@@ -645,48 +678,9 @@ fn run_worker(
         });
     }
 
-    let backend = match config.gpu.mode {
-        ComputeModeDto::Cpu => ComputeBackend::Cpu,
-        ComputeModeDto::Auto | ComputeModeDto::ForceGpu => ComputeBackend::Gpu,
-    };
-
-    if config.gpu.use_direct_prefilter {
-        crate::matching::set_gpu_fuzzy_direct_prep(true);
-    }
-    if config.gpu.use_levenshtein_full_scoring {
-        crate::matching::set_gpu_levenshtein_full_scoring(true);
-    }
-    if config.gpu.dynamic_tuning {
-        crate::matching::set_dynamic_gpu_tuning(true);
-    }
-    let fuzzy_gate_mode = match config.gpu.fuzzy_gate_mode {
-        GpuFuzzyGateModeDto::Off => crate::matching::GpuFuzzyGateMode::Off,
-        GpuFuzzyGateModeDto::Shadow => crate::matching::GpuFuzzyGateMode::Shadow,
-        GpuFuzzyGateModeDto::GateOnly => crate::matching::GpuFuzzyGateMode::GateOnly,
-    };
-    crate::matching::set_gpu_fuzzy_gate_mode(fuzzy_gate_mode);
-    if matches!(fuzzy_gate_mode, crate::matching::GpuFuzzyGateMode::Off) {
-        crate::matching::set_gpu_fuzzy_force(false);
-    } else {
-        crate::matching::set_gpu_fuzzy_metrics(true);
-        crate::matching::set_gpu_fuzzy_force(true);
-        sink.emit_log(LogEntryDto {
-            job_id: job_id.clone(),
-            timestamp_ms: now_ms(),
-            level: LogLevelDto::Info,
-            message: format!(
-                "GPU fuzzy gate mode for L10/L11 is {}",
-                fuzzy_gate_mode.as_str()
-            ),
-        });
-    }
-    if let Some(mb) = config.gpu.vram_budget_mb {
-        crate::matching::set_gpu_fuzzy_prepass_budget_mb(mb as u64);
-    }
-
     let mo = MatchOptions {
-        backend,
-        gpu: None,
+        backend: plan.backend,
+        gpu: plan.gpu_config,
         progress: ProgressConfig::default(),
         allow_birthdate_swap: config.options.allow_birthdate_swap,
     };
@@ -766,9 +760,9 @@ fn run_worker(
                 .to_string_lossy()
                 .into_owned(),
             exclusion_mode: exclusion,
-            compute_backend: backend,
+            compute_backend: plan.backend,
             gpu_device_id: None,
-            gpu_mem_budget_mb: config.gpu.vram_budget_mb.map(|mb| mb as u64),
+            gpu_mem_budget_mb: plan.vram_budget_mb,
             write_level_csv: false,
         };
 
@@ -917,7 +911,7 @@ fn run_worker(
                 mem_avail_mb: 0,
                 gpu_total_mb: 0,
                 gpu_free_mb: 0,
-                gpu_active: matches!(backend, ComputeBackend::Gpu),
+                gpu_active: matches!(plan.backend, ComputeBackend::Gpu),
                 records_per_sec: 0.0,
                 matches_found: 0,
             });

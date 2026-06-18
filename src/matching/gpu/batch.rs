@@ -14,9 +14,9 @@
 //! - Integrates with existing OOM backoff and memory budgeting
 //! - No changes to blocking logic, GPU kernels, or post-processing
 
-use super::resident::ResidentNamePool;
 use super::FuzzyCache;
 use super::MAX_STR;
+use super::resident::ResidentNamePool;
 use super::*; // Import from parent gpu module
 use crate::matching::MatchPair;
 use crate::matching::birthdate_matcher::birthdate_matches;
@@ -278,29 +278,6 @@ impl GpuBatchAccumulator {
             let cls = if super::gpu_no_mid_mode() {
                 super::classify_pair_cached_no_mid(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
             } else {
-                let m1 = t1[pair.outer_idx]
-                    .middle_name
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim();
-                let m2 = t2[pair.inner_idx]
-                    .middle_name
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim();
-                let l1 = m1
-                    .trim_matches('.')
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .count();
-                let l2 = m2
-                    .trim_matches('.')
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .count();
-                if l1 < 2 || l2 < 2 {
-                    continue;
-                }
                 super::classify_pair_cached(&cache1[pair.outer_idx], &cache2[pair.inner_idx])
             };
 
@@ -318,7 +295,7 @@ impl GpuBatchAccumulator {
                 results.push(MatchPair {
                     person1: t1[pair.outer_idx].clone(),
                     person2: t2[pair.inner_idx].clone(),
-                    confidence: score as f32,
+                    confidence: (score / 100.0) as f32,
                     matched_fields: vec!["fuzzy".into(), label, "birthdate".into()],
                     is_matched_infnbd: false,
                     is_matched_infnmnbd: false,
@@ -470,15 +447,16 @@ impl GpuBatchAccumulator {
             stats.batch_index_h2d_us += index_us;
             stats.h2d_time_us += index_us;
 
-            let gpu_props = crate::matching::gpu_config::query_gpu_properties(0).unwrap_or_else(
-                |_| crate::matching::gpu_config::GpuProperties {
-                    compute_major: 7,
-                    compute_minor: 0,
-                    sm_count: 30,
-                    max_threads_per_block: 1024,
-                    max_shared_memory_per_block: 49152,
-                },
-            );
+            let gpu_props =
+                crate::matching::gpu_config::query_gpu_properties(0).unwrap_or_else(|_| {
+                    crate::matching::gpu_config::GpuProperties {
+                        compute_major: 7,
+                        compute_minor: 0,
+                        sm_count: 30,
+                        max_threads_per_block: 1024,
+                        max_shared_memory_per_block: 49152,
+                    }
+                });
             let bs: u32 = crate::matching::gpu_config::calculate_optimal_block_size(
                 &gpu_props,
                 crate::matching::gpu_config::KernelType::Levenshtein,
@@ -902,15 +880,7 @@ impl GpuBatchAccumulator {
         }
 
         self.finish_gpu_batch_classification(
-            cache1,
-            cache2,
-            t1,
-            t2,
-            results,
-            allow_swap,
-            stats,
-            gate_mode,
-            keep_flags,
+            cache1, cache2, t1, t2, results, allow_swap, stats, gate_mode, keep_flags,
         )
     }
 }

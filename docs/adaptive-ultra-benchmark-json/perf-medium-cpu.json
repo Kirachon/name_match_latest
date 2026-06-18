@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "generated_unix_ms": 1781743284587,
+  "git_sha": "221b872",
+  "feature_flags": {
+    "gpu": true,
+    "gpu_bench": true,
+    "experimental_stringzilla_cuda": false,
+    "experimental_rapids_bench": false
+  },
+  "dataset": {
+    "id": "medium",
+    "hash_sha256": "6c438029ff0e0a2a59d10e6cddd5a6a5a807cab272a69245ce4645f5f7bcf82c",
+    "seed": 42,
+    "left_rows": 500,
+    "right_rows": 560,
+    "expected_current_matches": null,
+    "notes": [
+      "Generated deterministic in-memory fixture; no external data required",
+      "Candidate count is observed from Current engine GPU stats when GPU backend is used"
+    ],
+    "left_string_lengths": {
+      "min": 12,
+      "p50": 14,
+      "p95": 17,
+      "max": 17
+    },
+    "right_string_lengths": {
+      "min": 11,
+      "p50": 14,
+      "p95": 17,
+      "max": 18
+    }
+  },
+  "config": {
+    "backend": "cpu",
+    "warmup_runs": 2,
+    "measured_runs": 10,
+    "timing_unit": "microseconds",
+    "primary_gate": "full-production-path-runtime"
+  },
+  "hardware": {
+    "nvidia_smi": {
+      "available": true,
+      "reason": null,
+      "raw_summary": "NVIDIA GeForce RTX 4050 Laptop GPU, 610.62, 0, 6141, 0"
+    }
+  },
+  "engines": [
+    {
+      "engine_id": "current",
+      "availability": {
+        "status": "available"
+      },
+      "timings": {
+        "cold_total_us": 7688,
+        "measured_total_us": {
+          "min": 4959,
+          "p50": 5264,
+          "p95": 5762,
+          "p99": 5762,
+          "max": 5762,
+          "mean": 5268.2,
+          "stddev": 214.47787764708974,
+          "samples": [
+            4959,
+            5088,
+            5107,
+            5156,
+            5243,
+            5264,
+            5291,
+            5334,
+            5478,
+            5762
+          ]
+        }
+      },
+      "throughput": {
+        "matches_per_sec_p50": 31155.01519756839,
+        "left_rows_per_sec_p50": 94984.80243161095,
+        "right_rows_per_sec_p50": 106382.97872340426
+      },
+      "output": {
+        "matches_emitted": 164,
+        "output_hash_sha256": "18becccd4f741fb54f27ffc99cf533d6dbf1654ba3c4141adf640bb714095a1a",
+        "canonical_output_hash_sha256": "18becccd4f741fb54f27ffc99cf533d6dbf1654ba3c4141adf640bb714095a1a"
+      },
+      "gpu_stats": null,
+      "parity": {
+        "oracle_engine_id": "current",
+        "false_negatives_vs_current": 0,
+        "false_positives_vs_current": 0,
+        "false_negative_pair_ids": [],
+        "false_positive_pair_ids": [],
+        "pair_ids_match_current": true,
+        "canonical_output_hash_matches_current": true,
+        "output_hash_matches_current": true,
+        "blocking_failure": false,
+        "notes": [
+          "Current-vs-Current nondeterminism control",
+          "Ordered hash mismatch with canonical hash match means ordering drift only"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "recommendation": "baseline-only",
+    "reason": "Current engine baseline completed; external engines are unavailable or not implemented in this slice."
+  }
+}

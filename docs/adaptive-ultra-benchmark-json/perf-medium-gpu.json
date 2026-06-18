@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "generated_unix_ms": 1781743365713,
+  "git_sha": "221b872",
+  "feature_flags": {
+    "gpu": true,
+    "gpu_bench": true,
+    "experimental_stringzilla_cuda": false,
+    "experimental_rapids_bench": false
+  },
+  "dataset": {
+    "id": "medium",
+    "hash_sha256": "6c438029ff0e0a2a59d10e6cddd5a6a5a807cab272a69245ce4645f5f7bcf82c",
+    "seed": 42,
+    "left_rows": 500,
+    "right_rows": 560,
+    "expected_current_matches": null,
+    "notes": [
+      "Generated deterministic in-memory fixture; no external data required",
+      "Candidate count is observed from Current engine GPU stats when GPU backend is used"
+    ],
+    "left_string_lengths": {
+      "min": 12,
+      "p50": 14,
+      "p95": 17,
+      "max": 17
+    },
+    "right_string_lengths": {
+      "min": 11,
+      "p50": 14,
+      "p95": 17,
+      "max": 18
+    }
+  },
+  "config": {
+    "backend": "gpu",
+    "warmup_runs": 2,
+    "measured_runs": 10,
+    "timing_unit": "microseconds",
+    "primary_gate": "full-production-path-runtime"
+  },
+  "hardware": {
+    "nvidia_smi": {
+      "available": true,
+      "reason": null,
+      "raw_summary": "NVIDIA GeForce RTX 4050 Laptop GPU, 610.62, 107, 6141, 22"
+    }
+  },
+  "engines": [
+    {
+      "engine_id": "current",
+      "availability": {
+        "status": "available"
+      },
+      "timings": {
+        "cold_total_us": 80401558,
+        "measured_total_us": {
+          "min": 12709,
+          "p50": 15038,
+          "p95": 21043,
+          "p99": 21043,
+          "max": 21043,
+          "mean": 15173.8,
+          "stddev": 2482.4165967862846,
+          "samples": [
+            12709,
+            12915,
+            12946,
+            13411,
+            14841,
+            15038,
+            15177,
+            15752,
+            17906,
+            21043
+          ]
+        }
+      },
+      "throughput": {
+        "matches_per_sec_p50": 10905.705545950259,
+        "left_rows_per_sec_p50": 33249.1022742386,
+        "right_rows_per_sec_p50": 37238.99454714723
+      },
+      "output": {
+        "matches_emitted": 164,
+        "output_hash_sha256": "18becccd4f741fb54f27ffc99cf533d6dbf1654ba3c4141adf640bb714095a1a",
+        "canonical_output_hash_sha256": "18becccd4f741fb54f27ffc99cf533d6dbf1654ba3c4141adf640bb714095a1a"
+      },
+      "gpu_stats": {
+        "input_rows_left": 500,
+        "input_rows_right": 560,
+        "candidate_pairs_seen": 2913,
+        "pairs_uploaded": 2002,
+        "matches_emitted": 164,
+        "normalization_time_us": 594,
+        "candidate_blocking_time_us": 117,
+        "cache_build_time_us": 687,
+        "candidate_scan_time_us": 522,
+        "h2d_time_us": 3072,
+        "kernel_time_us": 2097,
+        "d2h_time_us": 0,
+        "cpu_classification_time_us": 2798,
+        "total_wall_time_us": 12798,
+        "gpu_tile_count": 1,
+        "gpu_mem_query_count": 0,
+        "tile_size_min": 2002,
+        "tile_size_max": 40960,
+        "candidates_per_source_p50": 6,
+        "candidates_per_source_p95": 6,
+        "candidates_per_source_max": 6,
+        "resident_tables_enabled": false,
+        "resident_table_bytes": 0,
+        "resident_table_upload_us": 0,
+        "batch_index_h2d_us": 0
+      },
+      "parity": {
+        "oracle_engine_id": "current-cpu",
+        "false_negatives_vs_current": 0,
+        "false_positives_vs_current": 0,
+        "false_negative_pair_ids": [],
+        "false_positive_pair_ids": [],
+        "pair_ids_match_current": true,
+        "canonical_output_hash_matches_current": true,
+        "output_hash_matches_current": true,
+        "blocking_failure": false,
+        "notes": [
+          "Forced GPU Current output compared with CPU Current oracle",
+          "False negative means the candidate output missed a CPU Current pair",
+          "Ordered hash mismatch with canonical hash match means ordering drift only"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "recommendation": "baseline-only",
+    "reason": "Current engine baseline completed; external engines are unavailable or not implemented in this slice."
+  }
+}

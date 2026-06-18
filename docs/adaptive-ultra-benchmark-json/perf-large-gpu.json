@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "generated_unix_ms": 1781743571482,
+  "git_sha": "221b872",
+  "feature_flags": {
+    "gpu": true,
+    "gpu_bench": true,
+    "experimental_stringzilla_cuda": false,
+    "experimental_rapids_bench": false
+  },
+  "dataset": {
+    "id": "large",
+    "hash_sha256": "c1fa9cc3484c26aeab772839de3a2bd900de074683dcc98d9fbda3f1a36e19f2",
+    "seed": 42,
+    "left_rows": 2000,
+    "right_rows": 2200,
+    "expected_current_matches": null,
+    "notes": [
+      "Generated deterministic in-memory fixture; no external data required",
+      "Candidate count is observed from Current engine GPU stats when GPU backend is used"
+    ],
+    "left_string_lengths": {
+      "min": 12,
+      "p50": 14,
+      "p95": 17,
+      "max": 17
+    },
+    "right_string_lengths": {
+      "min": 11,
+      "p50": 15,
+      "p95": 17,
+      "max": 18
+    }
+  },
+  "config": {
+    "backend": "gpu",
+    "warmup_runs": 2,
+    "measured_runs": 5,
+    "timing_unit": "microseconds",
+    "primary_gate": "full-production-path-runtime"
+  },
+  "hardware": {
+    "nvidia_smi": {
+      "available": true,
+      "reason": null,
+      "raw_summary": "NVIDIA GeForce RTX 4050 Laptop GPU, 610.62, 107, 6141, 6"
+    }
+  },
+  "engines": [
+    {
+      "engine_id": "current",
+      "availability": {
+        "status": "available"
+      },
+      "timings": {
+        "cold_total_us": 78299050,
+        "measured_total_us": {
+          "min": 62691,
+          "p50": 65796,
+          "p95": 66536,
+          "p99": 66536,
+          "max": 66536,
+          "mean": 65006.4,
+          "stddev": 1437.9327661611999,
+          "samples": [
+            62691,
+            64001,
+            65796,
+            66008,
+            66536
+          ]
+        }
+      },
+      "throughput": {
+        "matches_per_sec_p50": 26369.38415709162,
+        "left_rows_per_sec_p50": 30396.984619125786,
+        "right_rows_per_sec_p50": 33436.68308103836
+      },
+      "output": {
+        "matches_emitted": 1735,
+        "output_hash_sha256": "b533f7745320d52fbcd0ea65d789205b4042ce4b1a7734b3c9eb54f084f64564",
+        "canonical_output_hash_sha256": "b533f7745320d52fbcd0ea65d789205b4042ce4b1a7734b3c9eb54f084f64564"
+      },
+      "gpu_stats": {
+        "input_rows_left": 2000,
+        "input_rows_right": 2200,
+        "candidate_pairs_seen": 45832,
+        "pairs_uploaded": 31450,
+        "matches_emitted": 1735,
+        "normalization_time_us": 908,
+        "candidate_blocking_time_us": 299,
+        "cache_build_time_us": 2565,
+        "candidate_scan_time_us": 8149,
+        "h2d_time_us": 3487,
+        "kernel_time_us": 3947,
+        "d2h_time_us": 0,
+        "cpu_classification_time_us": 35855,
+        "total_wall_time_us": 58223,
+        "gpu_tile_count": 1,
+        "gpu_mem_query_count": 0,
+        "tile_size_min": 31450,
+        "tile_size_max": 40960,
+        "candidates_per_source_p50": 23,
+        "candidates_per_source_p95": 23,
+        "candidates_per_source_max": 23,
+        "resident_tables_enabled": false,
+        "resident_table_bytes": 0,
+        "resident_table_upload_us": 0,
+        "batch_index_h2d_us": 0
+      },
+      "parity": {
+        "oracle_engine_id": "current-cpu",
+        "false_negatives_vs_current": 0,
+        "false_positives_vs_current": 0,
+        "false_negative_pair_ids": [],
+        "false_positive_pair_ids": [],
+        "pair_ids_match_current": true,
+        "canonical_output_hash_matches_current": true,
+        "output_hash_matches_current": false,
+        "blocking_failure": false,
+        "notes": [
+          "Forced GPU Current output compared with CPU Current oracle",
+          "False negative means the candidate output missed a CPU Current pair",
+          "Ordered hash mismatch with canonical hash match means ordering drift only"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "recommendation": "baseline-only",
+    "reason": "Current engine baseline completed; external engines are unavailable or not implemented in this slice."
+  }
+}
