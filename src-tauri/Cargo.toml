@@ -46,7 +46,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 name_matcher = { path = "..", default-features = false }
 
 # System diagnostics.
-sysinfo = "0.37"
+sysinfo = "0.39"
 
 # Result store + export helpers (writers used directly by `export_results`).
 csv = "1.3"
